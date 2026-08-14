@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  infra-workbench:
+    build: .
+    container_name: infra-workbench
+    ports:
+      - "9080:8080"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
+      - LDAP_SERVER=ldap://YOUR_DC_IP:389
+      - LDAP_DOMAIN=your-domain.local
+      - LDAP_BIND_USER=YOUR_DOMAIN\YOUR_ADMIN_USER
+      - LDAP_BIND_PASS=YOUR_LDAP_PASSWORD
+      - ADMIN_USERNAME=wangdj
+      - SECRET_KEY=YOUR_SECRET_KEY_HERE
+      - AI_BASE_URL=http://YOUR_AI_IP:9997/v1
+      - AI_MODEL=qwen3.6
+    restart: unless-stopped
+    networks:
+      - infra-net
+
+networks:
+  infra-net:
+    driver: bridge
