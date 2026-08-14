@@ -3186,9 +3186,40 @@ async function generateMcpToken() {
   if (!confirm('生成新 Token 将使旧 Token 立即失效，确认继续？')) return;
   try {
     const data = await api('/api/mcp/config', {method:'POST'});
-    mcpConfigCache = data;
-    renderMcpConfig();
+    // 刷新 MCP 配置面板
+    await loadMcpConfig();
+    // 弹出完整 Token 供用户复制
+    const fullToken = data.token || '';
+    const endpoint = data.endpoint || '';
+    const hint = data.hint || '请妥善保存该 Token，系统只显示一次。';
+    showModal(`
+      <h3 style="margin:0 0 16px;font-size:16px">MCP Token 已生成</h3>
+      <div style="margin-bottom:12px">
+        <label style="font-size:13px;color:var(--text-secondary);display:block;margin-bottom:4px">Token（仅显示一次，请立即复制）</label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input type="text" id="mcpNewTokenInput" readonly value="${escapeHtml(fullToken)}"
+            style="flex:1;font-family:monospace;font-size:13px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text)">
+          <button class="btn btn-primary-sm" onclick="copyMcpToken()">复制</button>
+        </div>
+      </div>
+      <div style="margin-bottom:12px">
+        <label style="font-size:13px;color:var(--text-secondary);display:block;margin-bottom:4px">SSE 端点</label>
+        <input type="text" readonly value="${escapeHtml(endpoint)}" onclick="this.select()"
+          style="width:100%;font-family:monospace;font-size:12px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text)">
+      </div>
+      <p style="font-size:12px;color:var(--warning);margin:0 0 16px">⚠ ${escapeHtml(hint)}</p>
+      <div style="text-align:right"><button class="btn" onclick="closeModal()">关闭</button></div>
+    `);
   } catch(err) { alert(err.message); }
+}
+function copyMcpToken() {
+  const input = document.getElementById('mcpNewTokenInput');
+  if (!input) return;
+  input.select();
+  navigator.clipboard.writeText(input.value).then(() => {
+    const btn = input.nextElementSibling;
+    if (btn) { const old = btn.textContent; btn.textContent = '已复制'; setTimeout(() => btn.textContent = old, 1500); }
+  });
 }
 async function deleteMcpConfig() {
   if (!confirm('确认禁用 MCP 接入？禁用后所有已配置的 MCP 客户端将无法连接。')) return;
