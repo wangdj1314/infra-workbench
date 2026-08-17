@@ -3609,10 +3609,15 @@ def stats():
                 'last_visit': last_visit
             }
 
+        # v25.9：附加钉钉绑定状态
+        bound_rows = db.execute('SELECT user_id FROM dingtalk_bindings').fetchall()
+        bound_ids = set(r['user_id'] for r in bound_rows)
+
         user_stats_list = []
         for u in user_stats:
             d = dict(u)
             d['activity'] = activity_stats.get(u['id'], {})
+            d['dingtalk_bound'] = u['id'] in bound_ids
             user_stats_list.append(d)
 
         return jsonify({
