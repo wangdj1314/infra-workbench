@@ -68,6 +68,28 @@ input,select,textarea{font-family:inherit;font-size:14px}
 .btn-logout:hover{color:var(--danger);border-color:var(--danger)}
 .ai-token-badge{display:flex;align-items:center;gap:6px;padding:4px 10px;border-radius:12px;font-size:12px;background:rgba(137,87,229,.12);color:var(--ai);border:1px solid rgba(137,87,229,.3);cursor:pointer}
 .ai-token-badge:hover{background:rgba(137,87,229,.2)}
+.btn-help{width:28px;height:28px;border-radius:50%;background:var(--surface2);color:var(--muted);font-size:15px;font-weight:700;border:1px solid var(--border);cursor:pointer;display:flex;align-items:center;justify-content:center}
+.btn-help:hover{color:var(--primary);border-color:var(--primary)}
+/* ---- 小工具公共池选择卡片 ---- */
+.wgpool-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-top:10px}
+.wgpool-card{border:1px solid var(--border);border-radius:10px;padding:12px 10px;text-align:center;cursor:pointer;position:relative;background:var(--surface);transition:.15s}
+.wgpool-card:hover{border-color:var(--primary);background:var(--surface2)}
+.wgpool-card.added{opacity:.55;cursor:default}
+.wgpool-card .ic{font-size:26px;display:block;margin-bottom:6px}
+.wgpool-card .t{font-size:13px;font-weight:600}
+.wgpool-card .u{font-size:10px;color:var(--muted);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wgpool-card .cnt{position:absolute;top:6px;right:8px;font-size:10px;color:var(--muted)}
+.wgpool-card .added-flag{position:absolute;top:6px;left:8px;font-size:10px;color:var(--success)}
+/* 磁贴公共池同步角标 */
+.rs-tile-pool-badge{font-size:9px;background:rgba(88,166,255,.15);color:var(--primary);border-radius:8px;padding:1px 6px;margin-left:4px;vertical-align:middle}
+/* ---- 帮助文档 ---- */
+.help-doc h4{font-size:14px;margin:18px 0 8px;color:var(--primary);border-left:3px solid var(--primary);padding-left:8px}
+.help-doc p,.help-doc li{font-size:13px;color:var(--text);line-height:1.7}
+.help-doc code{background:var(--surface2);padding:1px 6px;border-radius:4px;font-size:12px;color:#e3b341}
+.help-doc pre{background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px;overflow-x:auto;line-height:1.5}
+.help-doc table{width:100%;border-collapse:collapse;margin:8px 0;font-size:12px}
+.help-doc th,.help-doc td{border:1px solid var(--border);padding:6px 8px;text-align:left}
+.help-doc th{background:var(--surface2)}
 
 /* ---- Main Layout (sidebar + content + right-sidebar) ---- */
 .main-layout{display:flex;flex:1;min-height:0}
@@ -621,6 +643,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83"/></svg>
         <span id="aiTokenCount">0</span> tokens
       </div>
+      <button class="btn-help" onclick="showHelpModal()" title="使用帮助 / 小工具开发框架">?</button>
       <div class="user-info">
         <div class="user-avatar" id="userAvatar"></div>
         <span id="userName"></span>
@@ -666,6 +689,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
         <div class="tab hidden" data-tab="members" onclick="switchTab('members')">成员管理</div>
         <div class="tab hidden" data-tab="manage" onclick="switchTab('manage')">工作内容管理</div>
         <div class="tab hidden" data-tab="links" onclick="switchTab('links')">链接管理</div>
+        <div class="tab hidden" data-tab="tools" onclick="switchTab('tools')">小工具管理</div>
         <div class="tab" data-tab="kb" onclick="switchTab('kb')">知识库</div>
         <div class="tab" data-tab="apikey" onclick="switchTab('apikey')">API 设置</div>
       </div>
@@ -771,6 +795,19 @@ input,select,textarea{font-family:inherit;font-size:14px}
           </div>
           <p class="ai-hint" style="margin-bottom:12px">管理右侧边栏「添加常用链接」弹窗中展示的公共池链接，支持编辑、删除。</p>
           <div id="adminLinksList"></div>
+        </div>
+
+        <!-- Tool Management Tab (小工具公共池) -->
+        <div id="tab-tools" class="hidden">
+          <div class="section-header">
+            <h2>公共小工具池管理</h2>
+            <div style="display:flex;gap:8px">
+              <button class="btn btn-sm" onclick="showHelpModal('widget-dev')">📖 开发框架文档</button>
+              <button class="btn btn-primary-sm" onclick="showNewTileToolModal()">+ 添加公共小工具</button>
+            </div>
+          </div>
+          <p class="ai-hint" style="margin-bottom:12px">管理右侧边栏「添加小工具」弹窗中展示的公共池工具。所有用户可一键添加；在此编辑标题 / 地址 / 图标会自动同步到已添加该工具的全部用户。开发新工具请参考「小工具开发框架」（右上角 ? 帮助）。</p>
+          <div id="adminToolsList"></div>
         </div>
 
         <!-- Knowledge Base Tab -->
@@ -982,6 +1019,7 @@ function showApp() {
     document.querySelector('[data-tab="members"]').classList.remove('hidden');
     document.querySelector('[data-tab="manage"]').classList.remove('hidden');
     document.querySelector('[data-tab="links"]').classList.remove('hidden');
+    document.querySelector('[data-tab="tools"]').classList.remove('hidden');
     document.getElementById('reportUserFilter').style.display = '';
   }
   // v25.9：记录页面打开活动
@@ -995,12 +1033,12 @@ function showApp() {
   loadApiKeys();
   loadAiUsage();
   loadResponsibilityAreas();
-  // v25.9：每 60s 自动拉取一次常用链接，感知后台公共链接池更新（图标/标题/URL）
+  // v25.9：每 60s 自动拉取一次常用链接和小工具，感知后台公共池更新（图标/标题/URL）
   if (!window._quickLinksPoll) {
     window._quickLinksPoll = setInterval(() => {
       // 仅在主工作台页面激活时刷新，避免不必要的请求
-      const wsTab = document.querySelector('[data-tab="workbench"]');
-      if (wsTab && wsTab.classList.contains('active')) loadQuickLinks();
+      const wsTab = document.querySelector('[data-tab="dashboard"]');
+      if (wsTab && wsTab.classList.contains('active')) { loadQuickLinks(); loadWidgets(); }
     }, 60000);
   }
   // v17: 所有用户预加载团队成员列表（用于转办/协同选择）
@@ -1098,6 +1136,7 @@ function switchTab(tab) {
   if (tab === 'members') loadMembers();
   if (tab === 'manage') loadAdminWorkItems();
   if (tab === 'links') loadAdminLinks();
+  if (tab === 'tools') loadAdminTools();
   if (tab === 'apikey') { loadApiKeys(); loadAiUsage(); loadMcpConfig(); }
   if (tab === 'kb') { loadDingtalkStatus(); loadKnowledge(); }
 }
@@ -2287,13 +2326,18 @@ function renderWidgetTiles() {
       title = isToday ? '今日日程' : (title === '今日日程' ? '日程安排' : title);
     }
     const del = w.id ? `<button class="rs-tile-del" title="删除" onclick="event.stopPropagation();deleteWidget(${w.id})">×</button>` : '';
+    // v25.9：自定义工具支持编辑（公共池关联的显示同步角标）
+    const isCustom = w.kind === 'iframe' && w.id;
+    const edit = isCustom ? `<button class="rs-tile-del" title="编辑" style="right:26px" onclick="event.stopPropagation();showEditWidgetModal(${w.id})">✎</button>` : '';
+    const poolBadge = w._pool_synced ? `<span class="rs-tile-pool-badge" title="来自公共池，自动跟随更新">池</span>` : '';
     const body = w.kind === 'iframe' ? '' : `<div class="rs-tile-body">${previewLines(w)}</div>`;
     return `
     <div class="rs-tile size-${size}" title="${escapeHtml(w.title)}" onclick="openWidget('${w.kind}', ${w.id ?? 'null'})">
       <div class="rs-tile-head">
         <span class="rs-tile-icon">${w.icon || tileDefaultIcon(w.kind)}</span>
-        <span class="rs-tile-title">${escapeHtml(title)}</span>
+        <span class="rs-tile-title">${escapeHtml(title)}${poolBadge}</span>
         <button class="rs-tile-size-btn" title="尺寸：${SIZE_LABEL[size]}（点击切换）" onclick="event.stopPropagation();cycleWidgetSize('${w.kind}', ${w.id ?? 'null'})">${SIZE_LABEL[size] === '大' ? '🗕' : '⤢'}</button>
+        ${edit}
         ${del}
       </div>
       ${body}
@@ -2394,51 +2438,101 @@ function showAddWidgetModal() {
   const box = document.createElement('div');
   box.className = 'widget-modal';
   box.innerHTML = `
-    <div class="widget-modal-box" style="width:min(520px,94vw);height:auto">
+    <div class="widget-modal-box" style="width:min(560px,94vw);height:auto;max-height:88vh;display:flex;flex-direction:column">
       <div class="widget-modal-head">
         <span class="widget-modal-title">➕ 添加小工具</span>
         <button class="widget-modal-close" onclick="this.closest('.widget-modal').remove()">×</button>
       </div>
-      <div class="widget-modal-body">
-        <div style="display:flex;flex-direction:column;gap:10px">
-          <div>
-            <label style="font-size:12px;color:var(--muted)">工具名称</label>
-            <input id="wgTitle" class="input" style="width:100%;margin-top:4px" placeholder="例如：Zabbix 告警">
-          </div>
-          <div>
-            <label style="font-size:12px;color:var(--muted)">类型</label>
-            <select id="wgKind" class="input" style="width:100%;margin-top:4px">
-              <option value="iframe">自定义网页 (iframe)</option>
-              <option value="todo">内置：待办列表</option>
-              <option value="calendar">内置：日程</option>
-              <option value="chat">内置：最近聊天</option>
-              <option value="minutes">内置：听记摘要</option>
-            </select>
-          </div>
-          <div id="wgUrlWrap">
-            <label style="font-size:12px;color:var(--muted)">网页地址 (iframe)</label>
-            <input id="wgUrl" class="input" style="width:100%;margin-top:4px" placeholder="https://grafana.example.com/d/xxx">
-          </div>
-          <div>
-            <label style="font-size:12px;color:var(--muted)">图标（emoji，可选）</label>
-            <input id="wgIcon" class="input" style="width:100%;margin-top:4px" placeholder="🔔 / 📈 / 🖥️">
-          </div>
-          <div>
-            <label style="font-size:12px;color:var(--muted)">磁贴尺寸</label>
-            <select id="wgSize" class="input" style="width:100%;margin-top:4px">
-              <option value="s">小（仅图标+标题）</option>
-              <option value="m" selected>中（显示 3 条摘要）</option>
-              <option value="l">大（整行，显示 6 条摘要）</option>
-            </select>
-          </div>
-          <button class="btn" style="margin-top:6px" onclick="saveNewWidget()">保存</button>
-        </div>
+      <div class="widget-modal-body" style="overflow-y:auto">
+        <div id="wgPoolView"><div class="rs-widget-empty">加载公共工具池...</div></div>
+        <div id="wgCustomView" style="display:none"></div>
       </div>
     </div>`;
   document.body.appendChild(box);
-  const kindSel = box.querySelector('#wgKind');
-  const urlWrap = box.querySelector('#wgUrlWrap');
+  loadWidgetPoolView(box);
+}
+async function loadWidgetPoolView(box) {
+  const view = box.querySelector('#wgPoolView');
+  try {
+    const pool = await api('/api/tile-tools') || [];
+    const addedIds = new Set((widgetsCache.custom || []).map(w => w.pool_id).filter(Boolean));
+    const cards = pool.map(t => {
+      const added = addedIds.has(t.id);
+      return `<div class="wgpool-card ${added ? 'added' : ''}" onclick="${added ? '' : `addWidgetFromPool(${t.id})`}" title="${escapeHtml(t.url || '')}">
+        ${added ? '<span class="added-flag">✓ 已添加</span>' : ''}
+        <span class="cnt">使用 ${t.use_count || 0} 次</span>
+        <span class="ic">${t.icon || '🧩'}</span>
+        <span class="t">${escapeHtml(t.title)}</span>
+        <span class="u">${escapeHtml(t.url || '')}</span>
+      </div>`;
+    }).join('');
+    view.innerHTML = `
+      <div style="font-size:12px;color:var(--muted)">从团队公共池选择（一键添加，后续自动跟随更新）：</div>
+      <div class="wgpool-grid">${cards || '<div class="rs-widget-empty" style="grid-column:1/-1">公共池暂无工具</div>'}</div>
+      <div style="margin-top:14px;border-top:1px dashed var(--border);padding-top:12px">
+        <button class="btn btn-sm" onclick="showWidgetCustomForm(this.closest('.widget-modal'))">＋ 自定义新建小工具（自动加入公共池）</button>
+      </div>`;
+  } catch(err) {
+    view.innerHTML = `<div class="rs-widget-empty">加载失败: ${escapeHtml(err.message)}</div>`;
+  }
+}
+async function addWidgetFromPool(poolId) {
+  try {
+    await api('/api/widgets', { method:'POST', body: JSON.stringify({ pool_id: poolId }) });
+    const m = document.querySelector('.widget-modal');
+    if (m) m.remove();
+    loadWidgets();
+  } catch(err) { alert(err.message); }
+}
+function showWidgetCustomForm(box) {
+  box.querySelector('#wgPoolView').style.display = 'none';
+  const cv = box.querySelector('#wgCustomView');
+  cv.style.display = '';
+  cv.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="font-size:12px;color:var(--muted)">自定义新建的小工具会自动加入公共池，团队其他成员也能一键添加。</div>
+      <div>
+        <label style="font-size:12px;color:var(--muted)">工具名称</label>
+        <input id="wgTitle" class="input" style="width:100%;margin-top:4px" placeholder="例如：Zabbix 告警">
+      </div>
+      <div>
+        <label style="font-size:12px;color:var(--muted)">类型</label>
+        <select id="wgKind" class="input" style="width:100%;margin-top:4px">
+          <option value="iframe">自定义网页 (iframe)</option>
+          <option value="todo">内置：待办列表</option>
+          <option value="calendar">内置：日程</option>
+          <option value="chat">内置：最近聊天</option>
+          <option value="minutes">内置：听记摘要</option>
+        </select>
+      </div>
+      <div id="wgUrlWrap">
+        <label style="font-size:12px;color:var(--muted)">网页地址 (iframe)</label>
+        <input id="wgUrl" class="input" style="width:100%;margin-top:4px" placeholder="https://grafana.example.com/d/xxx">
+      </div>
+      <div>
+        <label style="font-size:12px;color:var(--muted)">图标（emoji，可选）</label>
+        <input id="wgIcon" class="input" style="width:100%;margin-top:4px" placeholder="🔔 / 📈 / 🖥️">
+      </div>
+      <div>
+        <label style="font-size:12px;color:var(--muted)">磁贴尺寸</label>
+        <select id="wgSize" class="input" style="width:100%;margin-top:4px">
+          <option value="s">小（仅图标+标题）</option>
+          <option value="m" selected>中（显示 3 条摘要）</option>
+          <option value="l">大（整行，显示 6 条摘要）</option>
+        </select>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:6px">
+        <button class="btn btn-sm" onclick="backWidgetPoolView(this.closest('.widget-modal'))">← 返回公共池</button>
+        <button class="btn" style="flex:1" onclick="saveNewWidget()">保存</button>
+      </div>
+    </div>`;
+  const kindSel = cv.querySelector('#wgKind');
+  const urlWrap = cv.querySelector('#wgUrlWrap');
   kindSel.addEventListener('change', () => { urlWrap.style.display = kindSel.value === 'iframe' ? '' : 'none'; });
+}
+function backWidgetPoolView(box) {
+  box.querySelector('#wgCustomView').style.display = 'none';
+  box.querySelector('#wgPoolView').style.display = '';
 }
 async function saveNewWidget() {
   const title = document.getElementById('wgTitle').value.trim();
@@ -2459,6 +2553,154 @@ async function deleteWidget(id) {
   try {
     await api(`/api/widgets/${id}`, {method:'DELETE'});
     loadWidgets();
+  } catch(err) { alert(err.message); }
+}
+// v25.9：编辑个人小工具（公共池关联的可"从此独立"）
+function showEditWidgetModal(id) {
+  const w = (widgetsCache.custom || []).find(x => x.id === id);
+  if (!w) return;
+  const synced = !!w._pool_synced;
+  const box = document.createElement('div');
+  box.className = 'widget-modal';
+  box.innerHTML = `
+    <div class="widget-modal-box" style="width:min(520px,94vw);height:auto">
+      <div class="widget-modal-head">
+        <span class="widget-modal-title">✎ 编辑小工具</span>
+        <button class="widget-modal-close" onclick="this.closest('.widget-modal').remove()">×</button>
+      </div>
+      <div class="widget-modal-body">
+        <div style="display:flex;flex-direction:column;gap:10px">
+          ${synced ? '<div style="font-size:12px;color:var(--primary);background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.3);border-radius:6px;padding:8px">此工具已关联公共池，标题/地址/图标会跟随管理员更新自动同步。</div>' : ''}
+          <div>
+            <label style="font-size:12px;color:var(--muted)">工具名称</label>
+            <input id="ewTitle" class="input" style="width:100%;margin-top:4px" value="${escapeHtml(w.title)}" ${synced ? 'disabled' : ''}>
+          </div>
+          <div>
+            <label style="font-size:12px;color:var(--muted)">网页地址 (iframe)</label>
+            <input id="ewUrl" class="input" style="width:100%;margin-top:4px" value="${escapeHtml(w.url || '')}" ${synced ? 'disabled' : ''}>
+          </div>
+          <div>
+            <label style="font-size:12px;color:var(--muted)">图标（emoji）</label>
+            <input id="ewIcon" class="input" style="width:100%;margin-top:4px" value="${escapeHtml(w.icon || '')}" ${synced ? 'disabled' : ''}>
+          </div>
+          ${synced ? `<label style="font-size:12px;display:flex;gap:6px;align-items:center;cursor:pointer">
+            <input type="checkbox" id="ewUnlink" onchange="['ewTitle','ewUrl','ewIcon'].forEach(i=>document.getElementById(i).disabled=!this.checked)">
+            从此独立（解除公共池关联，之后可自行修改且不再跟随更新）</label>` : ''}
+          <button class="btn" style="margin-top:6px" onclick="saveEditWidget(${id}, ${synced})">保存</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(box);
+}
+async function saveEditWidget(id, wasSynced) {
+  const unlink = wasSynced && document.getElementById('ewUnlink') && document.getElementById('ewUnlink').checked;
+  const body = { unlink_pool: !!unlink };
+  if (unlink) {
+    body.title = document.getElementById('ewTitle').value.trim();
+    body.url = document.getElementById('ewUrl').value.trim();
+    body.icon = document.getElementById('ewIcon').value.trim();
+  }
+  try {
+    await api(`/api/widgets/${id}`, { method:'PUT', body: JSON.stringify(body) });
+    const m = document.querySelector('.widget-modal');
+    if (m) m.remove();
+    loadWidgets();
+  } catch(err) { alert(err.message); }
+}
+
+// ---- 管理员：公共小工具池管理 (v25.9) ----
+let adminToolsCache = [];
+async function loadAdminTools() {
+  try {
+    adminToolsCache = await api('/api/tile-tools') || [];
+    renderAdminTools();
+  } catch(err) {
+    document.getElementById('adminToolsList').innerHTML = `<div class="empty"><p>加载失败: ${err.message}</p></div>`;
+  }
+}
+function renderAdminTools() {
+  const el = document.getElementById('adminToolsList');
+  if (!el) return;
+  if (!adminToolsCache.length) {
+    el.innerHTML = '<div class="empty"><p>公共小工具池为空，点击右上角「+ 添加公共小工具」创建</p></div>';
+    return;
+  }
+  el.innerHTML = `<table class="team-table">
+    <thead>
+      <tr><th style="width:44px">图标</th><th>标题</th><th>类型</th><th>地址</th><th>使用次数</th><th>创建人</th><th style="width:100px">操作</th></tr>
+    </thead>
+    <tbody>
+      ${adminToolsCache.map(t => `<tr>
+        <td><span style="font-size:22px">${t.icon || '🧩'}</span></td>
+        <td>${escapeHtml(t.title)}</td>
+        <td><span class="badge badge-category">${t.kind === 'iframe' ? 'iframe' : escapeHtml(t.kind)}</span></td>
+        <td><a href="${escapeHtml(t.url || '#')}" target="_blank" style="color:var(--primary)">${escapeHtml(linkDomain(t.url || '') || '-')}</a></td>
+        <td>${t.use_count || 0}</td>
+        <td>${escapeHtml(t.creator_name || '-')}</td>
+        <td>
+          <button class="btn btn-sm" onclick="showEditTileToolModal(${t.id})">编辑</button>
+          <button class="btn btn-sm btn-danger-sm" onclick="deleteTileTool(${t.id})">删除</button>
+        </td>
+      </tr>`).join('')}
+    </tbody>
+  </table>`;
+}
+function tileToolModalFields(t) {
+  t = t || {};
+  return `
+    <div class="form-row"><label>工具名称 *</label><input type="text" id="tool_title" value="${escapeHtml(t.title || '')}" placeholder="例如：Zabbix 监控"></div>
+    <div class="form-row"><label>网页地址 (iframe) *</label><input type="text" id="tool_url" value="${escapeHtml(t.url || '')}" placeholder="https://zabbix.example.com/"></div>
+    <div class="form-row"><label>图标（emoji，可选）</label><input type="text" id="tool_icon" value="${escapeHtml(t.icon || '')}" placeholder="📊 / 🖥️ / 🔔"></div>`;
+}
+function showNewTileToolModal() {
+  showModal(`
+    <div class="modal-header"><h3>➕ 添加公共小工具</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">${tileToolModalFields({})}
+      <p class="ai-hint">添加到公共池后，所有用户在「添加小工具」弹窗中可一键使用。开发规范参考帮助文档中的「小工具开发框架」。</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary-sm" onclick="submitTileTool()">添加</button>
+    </div>
+  `);
+}
+function showEditTileToolModal(id) {
+  const t = adminToolsCache.find(x => x.id === id);
+  if (!t) return;
+  showModal(`
+    <div class="modal-header"><h3>✎ 编辑公共小工具</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">${tileToolModalFields(t)}
+      <p class="ai-hint">保存后，已添加该工具的所有用户侧边栏会自动同步新的标题/地址/图标。</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-danger-sm" onclick="deleteTileTool(${id})" style="margin-right:auto">🗑 删除</button>
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary-sm" onclick="submitTileTool(${id})">保存</button>
+    </div>
+  `);
+}
+async function submitTileTool(id) {
+  const title = document.getElementById('tool_title').value.trim();
+  const url = document.getElementById('tool_url').value.trim();
+  const icon = document.getElementById('tool_icon').value.trim();
+  if (!title || !url) { alert('工具名称和网页地址不能为空'); return; }
+  const body = JSON.stringify({ title, url, icon, kind: 'iframe' });
+  try {
+    if (id) {
+      await api(`/api/tile-tools/${id}`, { method:'PUT', body });
+    } else {
+      await api('/api/tile-tools', { method:'POST', body });
+    }
+    closeModal();
+    loadAdminTools();
+  } catch(err) { alert(err.message); }
+}
+async function deleteTileTool(id) {
+  if (!confirm('确认从公共池中删除该小工具？已添加该工具的所有用户侧边栏也会一并移除。')) return;
+  try {
+    await api(`/api/tile-tools/${id}`, { method:'DELETE' });
+    closeModal();
+    loadAdminTools();
   } catch(err) { alert(err.message); }
 }
 
@@ -4088,6 +4330,97 @@ function closeModal() {
   stopDevicePoll();
   document.body.style.overflow = '';
   document.getElementById('modalContainer').innerHTML = '';
+}
+
+// ---- 帮助文档 (v25.9) ----
+function showHelpModal(section) {
+  const widgetDevDoc = `
+    <h4>1. 架构概述</h4>
+    <p>小工具采用 <code>iframe 嵌入 + 开放 API</code> 架构：每个小工具是一个独立的网页应用，通过 iframe 嵌入工作台右侧边栏；需要读写工作台数据时，调用 <code>/ext/api/*</code> 开放端点（API Key 鉴权）。工具注册进公共池后，全员可一键添加。</p>
+    <h4>2. 开发流程</h4>
+    <p>① 开发单页 HTML 工具（可独立部署到任意 Web 服务器）→ ② 管理员在「小工具管理」页把工具 URL 注册进公共池 → ③ 用户在右侧边栏「添加小工具」中一键添加 → ④ 管理员后续修改标题/地址/图标自动同步到所有用户。</p>
+    <h4>3. 开放 API 约定</h4>
+    <table>
+      <tr><th>端点</th><th>方法</th><th>说明</th></tr>
+      <tr><td><code>/ext/api/whoami</code></td><td>GET</td><td>验证 Key，返回当前用户身份</td></tr>
+      <tr><td><code>/ext/api/work-items</code></td><td>GET</td><td>查询工作项列表</td></tr>
+      <tr><td><code>/ext/api/work-items</code></td><td>POST</td><td>创建工作项（同步到用户工作台）</td></tr>
+      <tr><td><code>/ext/api/work-items/&lt;id&gt;</code></td><td>PUT</td><td>更新工作项状态/字段</td></tr>
+      <tr><td><code>/ext/api/stats</code></td><td>GET</td><td>工作项统计数据</td></tr>
+    </table>
+    <p>鉴权方式：请求头携带 <code>X-API-Key: &lt;你的Key&gt;</code>。Key 在「API 设置」页生成，绑定当前用户。</p>
+    <h4>4. 标准模板</h4>
+    <pre>&lt;!DOCTYPE html&gt;
+&lt;html&gt;
+&lt;head&gt;
+  &lt;meta charset="utf-8"&gt;
+  &lt;title&gt;我的小工具&lt;/title&gt;
+  &lt;style&gt; body{font-family:sans-serif;margin:12px} &lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+  &lt;div id="app"&gt;加载中...&lt;/div&gt;
+  &lt;script&gt;
+    // 工作台地址与 API Key（由用户在自己的「API 设置」页生成）
+    const WB = 'http://YOUR_SERVER_IP:9080';
+    const KEY = localStorage.getItem('wb_api_key')
+      || prompt('请输入你的工作台 API Key（API 设置页生成）');
+    if (KEY) localStorage.setItem('wb_api_key', KEY);
+    async function wb(path, opts = {}) {
+      const r = await fetch(WB + path, {
+        ...opts,
+        headers: { 'X-API-Key': KEY, 'Content-Type': 'application/json' }
+      });
+      if (!r.ok) throw new Error(await r.text());
+      return r.json();
+    }
+    // 示例：读取当前用户身份
+    wb('/ext/api/whoami').then(u =&gt; {
+      document.getElementById('app').textContent = '你好，' + u.display_name;
+    }).catch(e =&gt; {
+      document.getElementById('app').textContent = '调用失败: ' + e.message;
+    });
+  &lt;/script&gt;
+&lt;/body&gt;
+&lt;/html&gt;</pre>
+    <h4>5. 开发规范</h4>
+    <p>① 工具页面必须支持在 iframe 中运行（不要设置 <code>X-Frame-Options: DENY</code>；若目标站点无法嵌入，请改用「常用链接」磁贴）。② 页面保持轻量，首屏加载 &lt; 2s，避免轮询频率高于 30s。③ API Key 只存在用户浏览器本地，严禁写入公共代码库。④ 磁贴尺寸约定：小(s) 仅图标+标题，中(m) 3 条摘要，大(l) 整行 6 条摘要——工具弹窗内可自由布局。⑤ 图标统一使用 emoji，保持视觉风格一致。</p>
+    <h4>6. 注册发布检查清单</h4>
+    <p>□ 工具 URL 可被工作台服务器访问　□ 页面允许 iframe 嵌入　□ 标题/图标已确定　□ 在「小工具管理」注册到公共池　□ 通知团队成员添加使用</p>`;
+  const quickDoc = `
+    <h4>我的工作台</h4>
+    <p>登录后默认进入个人工作台：添加任务、开始/完成任务、生成 AI 工作建议与日/周/月报。左侧栏展示今日概览与本月日历，右侧栏展示常用链接与小工具磁贴。</p>
+    <h4>钉钉数据同步</h4>
+    <p>在「知识库」页绑定钉钉后，点击「立即同步」可拉取待办/日程/聊天/听记数据；系统每天 08:00 自动增量同步。同步的数据会进入 AI 工作建议与报告生成的上下文。</p>
+    <h4>公共池机制</h4>
+    <p>常用链接和小工具都有团队公共池：你新建的链接/工具会自动进入公共池，其他成员可一键添加；管理员在「链接管理」「小工具管理」页统一维护，修改会自动同步到所有已添加的成员（工具磁贴上带「池」角标的即为池关联项）。</p>
+    <h4>MCP 接入</h4>
+    <p>在「API 设置」页生成 MCP Token 后，WorkBuddy / Qoder 等 AI 客户端可通过 SSE 端点直接读写你的工作台数据。</p>
+    <h4>团队管理（管理员）</h4>
+    <p>团队概览查看成员任务量/完成率/活跃度（名字旁钉钉图标表示已绑定钉钉）；成员管理维护板块与职责；工作内容管理维护任务模板。</p>`;
+  showModal(`
+    <div class="modal-header"><h3>📖 使用帮助</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body help-doc" style="max-height:70vh;overflow-y:auto">
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <button class="btn btn-sm" id="helpTabQuick" onclick="switchHelpSection('quick')">快速上手</button>
+        <button class="btn btn-sm" id="helpTabDev" onclick="switchHelpSection('widget-dev')">🧩 小工具开发框架</button>
+      </div>
+      <div id="helpQuick">${quickDoc}</div>
+      <div id="helpWidgetDev" style="display:none">${widgetDevDoc}</div>
+    </div>
+  `);
+  switchHelpSection(section === 'widget-dev' ? 'widget-dev' : 'quick');
+}
+function switchHelpSection(sec) {
+  const q = document.getElementById('helpQuick'), d = document.getElementById('helpWidgetDev');
+  const bq = document.getElementById('helpTabQuick'), bd = document.getElementById('helpTabDev');
+  if (!q || !d) return;
+  if (sec === 'widget-dev') {
+    q.style.display = 'none'; d.style.display = '';
+    bd.classList.add('btn-primary-sm'); bq.classList.remove('btn-primary-sm');
+  } else {
+    q.style.display = ''; d.style.display = 'none';
+    bq.classList.add('btn-primary-sm'); bd.classList.remove('btn-primary-sm');
+  }
 }
 
 // ---- Utils ----

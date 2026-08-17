@@ -408,6 +408,43 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_tile_link_pool_title ON tile_link_pool(title);
     """)
     _ensure_column(conn, 'tile_link_pool', 'updated_at', "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+    # v25.9：小工具公共池关联（参照 quick_links.pool_id 模式）
+    _ensure_column(conn, 'user_widgets', 'pool_id', 'INTEGER DEFAULT 0')
+    _ensure_column(conn, 'tile_tool_pool', 'updated_at', "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS kv_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT DEFAULT ''
+    );
+    """)
+    # v25.9：首次部署时种子标准小工具进公共池（历史手工添加的 iframe 工具在库重建后丢失，
+    # 纳入公共池后所有用户可一键添加，管理员可在"小工具管理"页维护）
+    try:
+        seeded = conn.execute("SELECT value FROM kv_meta WHERE key='tools_pool_seeded'").fetchone()
+        pool_cnt = conn.execute('SELECT COUNT(*) AS c FROM tile_tool_pool').fetchone()['c']
+        if not seeded and pool_cnt == 0:
+            _seed_tools = [
+                ('Zabbix 监控', 'https://zabbix.example.com/', '📊'),
+                ('堡垒机', 'https://oma.risenenergy.com', '🔐'),
+                ('MCP 平台', 'https://mcp.example.com/#/modules', '🤖'),
+            ]
+            for t, u, i in _seed_tools:
+                conn.execute(
+                    'INSERT INTO tile_tool_pool (title, kind, url, icon, config, created_by) VALUES (?,?,?,?,?,?)',
+                    (t, 'iframe', u, i, '{"size": "m"}', None)
+                )
+            conn.execute("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('tools_pool_seeded', '1')")
+            # 恢复管理员(user 1)侧边栏丢失的 Zabbix 工具（关联公共池）
+            zrow = conn.execute("SELECT id FROM tile_tool_pool WHERE title='Zabbix 监控'").fetchone()
+            if zrow and conn.execute("SELECT id FROM users WHERE id=1").fetchone():
+                conn.execute(
+                    "INSERT INTO user_widgets (user_id, title, kind, icon, url, config, pool_id) "
+                    "SELECT 1, title, kind, icon, url, config, id FROM tile_tool_pool WHERE id=?",
+                    (zrow['id'],)
+                )
+            conn.commit()
+    except Exception as e:
+        print(f'[init_db] seed tile_tool_pool skipped: {e}')
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS tile_tool_pool (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2384,9 +2421,23 @@ def list_widgets():
         item['size'] = item.get('config', {}).get('size', 'm')
         builtins.append(item)
     iframes = []
+    # v25.9：公共池关联——pool_id>0 的工具标题/类型/地址/图标跟随公共池实时更新
+    pool_rows = db.execute('SELECT * FROM tile_tool_pool').fetchall()
+    pool_map = {p['id']: p for p in pool_rows}
     for w in custom:
         if w['kind'] not in ('todo', 'calendar', 'chat', 'minutes'):
             item = dict(w)
+            pid = item.get('pool_id') or 0
+            pool = pool_map.get(pid) if pid else None
+            if pool:
+                item['title'] = pool['title']
+                item['kind'] = pool['kind'] or item.get('kind') or 'iframe'
+                item['url'] = pool['url'] or item.get('url') or ''
+                item['icon'] = pool['icon'] or item.get('icon') or ''
+                item['_pool_synced'] = True
+                item['_pool_updated_at'] = pool['updated_at'] or ''
+            else:
+                item['_pool_synced'] = False
             item['config'] = _parse_widget_config(w['config'])
             item['size'] = item['config'].get('size', 'm')
             iframes.append(item)
@@ -2398,6 +2449,35 @@ def list_widgets():
 def add_widget():
     data = request.get_json(silent=True) or {}
     uid = session['user_id']
+    db = get_db()
+    config = data.get('config') or {}
+    if isinstance(config, dict):
+        config_str = json.dumps(config, ensure_ascii=False)
+    elif isinstance(config, str):
+        config_str = config
+    else:
+        config_str = ''
+    # v25.9：模式一——从公共池添加（pool_id），复制池配置为个人实例
+    pool_id = int(data.get('pool_id') or 0)
+    if pool_id:
+        pool = db.execute('SELECT * FROM tile_tool_pool WHERE id = ?', (pool_id,)).fetchone()
+        if not pool:
+            return jsonify({'error': '公共池工具不存在'}), 404
+        exists = db.execute(
+            'SELECT id FROM user_widgets WHERE user_id = ? AND pool_id = ?', (uid, pool_id)
+        ).fetchone()
+        if exists:
+            return jsonify({'error': '该工具已在你的侧边栏中'}), 400
+        cur = db.execute(
+            'INSERT INTO user_widgets (user_id, title, kind, icon, url, config, pool_id) VALUES (?,?,?,?,?,?,?)',
+            (uid, pool['title'], pool['kind'] or 'iframe', pool['icon'] or '', pool['url'] or '',
+             config_str or (pool['config'] or ''), pool_id)
+        )
+        db.execute('UPDATE tile_tool_pool SET use_count = use_count + 1 WHERE id = ?', (pool_id,))
+        db.commit()
+        w = db.execute('SELECT * FROM user_widgets WHERE id = ?', (cur.lastrowid,)).fetchone()
+        return jsonify(dict(w)), 201
+    # 模式二——自定义新建：写入个人表，同时自动加入公共池（参照链接管理模式）
     title = (data.get('title') or '').strip()
     kind = (data.get('kind') or 'iframe').strip()
     url = (data.get('url') or '').strip()
@@ -2408,21 +2488,27 @@ def add_widget():
         return jsonify({'error': 'iframe 地址不能为空'}), 400
     if url and not url.startswith(('http://', 'https://')):
         url = 'https://' + url
-    config = data.get('config') or {}
-    if isinstance(config, dict):
-        config = json.dumps(config, ensure_ascii=False)
-    elif not isinstance(config, str):
-        config = ''
     # 内置 kind 允许覆盖默认标题/图标
-    db = get_db()
     if kind in ('todo', 'calendar', 'chat', 'minutes'):
         db.execute(
             "DELETE FROM user_widgets WHERE user_id = ? AND kind = ?",
             (uid, kind)
         )
+        cur = db.execute(
+            'INSERT INTO user_widgets (user_id, title, kind, icon, url, config) VALUES (?, ?, ?, ?, ?, ?)',
+            (uid, title, kind, icon, url, config_str)
+        )
+        db.commit()
+        w = db.execute('SELECT * FROM user_widgets WHERE id = ?', (cur.lastrowid,)).fetchone()
+        return jsonify(dict(w)), 201
+    # iframe 自定义工具：同步进公共池，方便团队复用
+    pcur = db.execute(
+        'INSERT INTO tile_tool_pool (title, kind, url, icon, config, created_by, use_count) VALUES (?,?,?,?,?,?,1)',
+        (title, kind, url, icon, config_str, uid)
+    )
     cur = db.execute(
-        'INSERT INTO user_widgets (user_id, title, kind, icon, url, config) VALUES (?, ?, ?, ?, ?, ?)',
-        (uid, title, kind, icon, url, config)
+        'INSERT INTO user_widgets (user_id, title, kind, icon, url, config, pool_id) VALUES (?,?,?,?,?,?,?)',
+        (uid, title, kind, icon, url, config_str, pcur.lastrowid)
     )
     db.commit()
     w = db.execute('SELECT * FROM user_widgets WHERE id = ?', (cur.lastrowid,)).fetchone()
@@ -2440,6 +2526,9 @@ def update_widget(widget_id):
     if w['user_id'] != session['user_id']:
         return jsonify({'error': '无权操作'}), 403
     updates, params = [], []
+    # v25.9：解除公共池关联（从此独立，不再跟随池更新）
+    if data.get('unlink_pool'):
+        updates.append('pool_id = 0')
     for field in ['title', 'kind', 'icon', 'url', 'sort_order', 'enabled']:
         if field in data:
             updates.append(f'{field} = ?')
@@ -2652,6 +2741,8 @@ def update_tile_tool(tool_id):
         updates.append('config = ?')
         params.append(cfg)
     if updates:
+        # v25.9 同步：编辑公共池工具时刷新 updated_at，前台据此识别需更新的用户实例
+        updates.append('updated_at = CURRENT_TIMESTAMP')
         params.append(tool_id)
         db.execute(f'UPDATE tile_tool_pool SET {", ".join(updates)} WHERE id = ?', params)
         db.commit()
@@ -2675,6 +2766,8 @@ def delete_tile_tool(tool_id):
     if not tool:
         return jsonify({'error': '小工具不存在'}), 404
     db.execute('DELETE FROM user_tiles WHERE pool_type = ? AND pool_id = ?', ('tool', tool_id))
+    # v25.9：级联删除所有用户侧边栏中关联此池工具的个人实例
+    db.execute('DELETE FROM user_widgets WHERE pool_id = ?', (tool_id,))
     db.execute('DELETE FROM tile_tool_pool WHERE id = ?', (tool_id,))
     db.commit()
     return jsonify({'message': '已删除'})
