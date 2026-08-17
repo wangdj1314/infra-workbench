@@ -382,9 +382,41 @@ def init_db():
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_mcp_user ON mcp_configs(user_id);
+
+    CREATE TABLE IF NOT EXISTS mcp_tokens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        label TEXT DEFAULT '',
+        auth_token_hash TEXT NOT NULL,
+        auth_token_prefix TEXT DEFAULT '',
+        enabled INTEGER DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_used_at TEXT DEFAULT '',
+        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_mcp_tokens_hash ON mcp_tokens(auth_token_hash);
+    CREATE INDEX IF NOT EXISTS idx_mcp_tokens_user ON mcp_tokens(user_id);
     """)
     # 向后兼容：为旧库添加新列
     _ensure_column(conn, 'mcp_configs', 'updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
+    # v25.9：多 Token 迁移——旧单 token（mcp_configs）迁移到 mcp_tokens，label 标记为"默认"
+    try:
+        legacy = conn.execute(
+            "SELECT c.user_id, c.auth_token_hash, c.auth_token_prefix, c.created_at FROM mcp_configs c "
+            "WHERE c.auth_token_hash != '' AND NOT EXISTS "
+            "(SELECT 1 FROM mcp_tokens t WHERE t.user_id = c.user_id AND t.auth_token_hash = c.auth_token_hash)"
+        ).fetchall()
+        for r in legacy:
+            conn.execute(
+                "INSERT INTO mcp_tokens (user_id, label, auth_token_hash, auth_token_prefix, created_at) "
+                "VALUES (?, '默认', ?, ?, ?)",
+                (r['user_id'], r['auth_token_hash'], r['auth_token_prefix'] or '', r['created_at'])
+            )
+        if legacy:
+            conn.commit()
+            print(f'[init_db] migrated {len(legacy)} legacy MCP tokens to mcp_tokens')
+    except Exception as e:
+        print(f'[init_db] mcp_tokens migration skipped: {e}')
     _ensure_column(conn, 'users', 'job_description', 'TEXT DEFAULT \'\'')
     _ensure_column(conn, 'work_items', 'event_time', 'TEXT DEFAULT \'\'')
     _ensure_column(conn, 'work_items', 'occur_date', 'TEXT DEFAULT \'\'')
@@ -3974,12 +4006,26 @@ def _mcp_verify_token(token_hash):
 
     存库时为 sha256(token) 的十六进制摘要，因此这里先哈希再比对。
     （v21 修复：此前直接用原始 token 比对哈希列，导致永远 401。）
+    v25.9：支持多 Token——优先查 mcp_tokens（每工具一个 token），
+    命中后记录 last_used_at；兼容旧表 mcp_configs。
     """
     if not token_hash:
         return None
     db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row
     digest = hashlib.sha256(token_hash.encode()).hexdigest()
+    row = db.execute(
+        'SELECT id, user_id FROM mcp_tokens WHERE auth_token_hash = ? AND enabled = 1', (digest,)
+    ).fetchone()
+    if row:
+        try:
+            db.execute('UPDATE mcp_tokens SET last_used_at = ? WHERE id = ?', (_now_str(), row['id']))
+            db.commit()
+        except Exception:
+            pass
+        db.close()
+        return row['user_id']
+    # 兼容旧库：迁移前的单 token 仍可通过旧表验证
     row = db.execute('SELECT user_id FROM mcp_configs WHERE auth_token_hash = ? AND enabled = 1', (digest,)).fetchone()
     db.close()
     return row['user_id'] if row else None
@@ -4000,61 +4046,95 @@ def mcp_login_required(f):
 @app.route('/api/mcp/config', methods=['GET', 'POST'])
 @login_required
 def mcp_config():
-    """管理当前用户的 MCP 接入配置"""
+    """管理当前用户的 MCP 接入配置（v25.9：多 Token，每个 AI 工具一个）"""
     db = get_db()
     uid = session['user_id']
     if request.method == 'GET':
-        row = db.execute('SELECT * FROM mcp_configs WHERE user_id = ?', (uid,)).fetchone()
-        if not row:
-            return jsonify({'enabled': False, 'token_prefix': '', 'token_masked': '', 'endpoint': f"{request.host_url.rstrip('/')}/mcp/sse", 'tools': []})
-        # v25.9：返回脱敏 token + 已接入工具列表
-        prefix = row['auth_token_prefix'] or ''
-        token_masked = f"{prefix}****" if prefix else ''
+        # v25.9：返回全部 token 列表（脱敏）+ 已接入工具
+        token_rows = db.execute(
+            'SELECT * FROM mcp_tokens WHERE user_id = ? AND enabled = 1 ORDER BY created_at', (uid,)
+        ).fetchall()
+        tokens = []
+        for t in token_rows:
+            prefix = t['auth_token_prefix'] or ''
+            tokens.append({
+                'id': t['id'],
+                'label': t['label'] or '默认',
+                'token_prefix': prefix,
+                'token_masked': f"{prefix}****" if prefix else '',
+                'created_at': t['created_at'],
+                'last_used_at': t['last_used_at'] or ''
+            })
         # 从 work_items 查询通过 MCP 同步的工具标签（去重）
         tool_rows = db.execute(
             "SELECT DISTINCT tool_label FROM work_items WHERE user_id=? AND source='ai' AND tool_label != '' ORDER BY tool_label",
             (uid,)
         ).fetchall()
         tools = [r['tool_label'] for r in tool_rows]
+        enabled = len(tokens) > 0
         return jsonify({
-            'enabled': bool(row['enabled']),
-            'token_prefix': prefix,
-            'token_masked': token_masked,
-            'allowed_tools': row['allowed_tools'] or '*',
+            'enabled': enabled,
+            'tokens': tokens,
+            # 兼容旧前端字段：取第一个 token
+            'token_prefix': tokens[0]['token_prefix'] if tokens else '',
+            'token_masked': tokens[0]['token_masked'] if tokens else '',
+            'allowed_tools': '*',
             'endpoint': f"{request.host_url.rstrip('/')}/mcp/sse",
-            'created_at': row['created_at'],
+            'created_at': tokens[0]['created_at'] if tokens else '',
             'tools': tools
         })
-    # POST: 生成/重置 token（兼容旧库无 UNIQUE(user_id) 的情况，不用 ON CONFLICT）
+    # POST: 生成新 token（v25.9：多 Token，新增不覆盖旧 token；label 标记所属工具）
     data = request.get_json(silent=True) or {}
+    label = (data.get('label') or data.get('tool') or '').strip()[:32] or '默认'
     new_token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(new_token.encode()).hexdigest()
     prefix = new_token[:8]
-    allowed = (data.get('allowed_tools') or '*').strip()
-    now_iso = _now_str()
+    cur = db.execute(
+        'INSERT INTO mcp_tokens (user_id, label, auth_token_hash, auth_token_prefix) VALUES (?,?,?,?)',
+        (uid, label, token_hash, prefix))
+    # 同步维护旧表（兼容仍依赖 mcp_configs 的逻辑，如部署文档生成）
     existing = db.execute('SELECT id FROM mcp_configs WHERE user_id = ?', (uid,)).fetchone()
     if existing:
         db.execute(
-            'UPDATE mcp_configs SET auth_token_hash=?, auth_token_prefix=?, allowed_tools=?, updated_at=? WHERE user_id=?',
-            (token_hash, prefix, allowed, now_iso, uid))
+            'UPDATE mcp_configs SET auth_token_hash=?, auth_token_prefix=?, updated_at=? WHERE user_id=?',
+            (token_hash, prefix, _now_str(), uid))
     else:
         db.execute(
             'INSERT INTO mcp_configs (user_id, auth_token_hash, auth_token_prefix, allowed_tools, updated_at) VALUES (?,?,?,?,?)',
-            (uid, token_hash, prefix, allowed, now_iso))
+            (uid, token_hash, prefix, '*', _now_str()))
     db.commit()
     return jsonify({
+        'id': cur.lastrowid,
+        'label': label,
         'token': new_token,
         'token_prefix': prefix,
         'endpoint': f"{request.host_url.rstrip('/')}/mcp/sse",
-        'hint': '请妥善保存此 Token，系统只显示一次。后续在 WorkBuddy / MCP 客户端中配置使用。'
+        'hint': '请妥善保存此 Token，系统只显示一次。每个 AI 工具（WorkBuddy / Qoder 等）建议使用独立 Token，互不影响。'
     })
+
+
+@app.route('/api/mcp/config/<int:token_id>', methods=['DELETE'])
+@login_required
+def mcp_token_delete(token_id):
+    """吊销单个 MCP Token（v25.9 多 Token）"""
+    db = get_db()
+    uid = session['user_id']
+    row = db.execute('SELECT * FROM mcp_tokens WHERE id = ? AND user_id = ?', (token_id, uid)).fetchone()
+    if not row:
+        return jsonify({'error': 'Token 不存在'}), 404
+    db.execute('DELETE FROM mcp_tokens WHERE id = ?', (token_id,))
+    # 若删的是旧表里同步的那条，清理旧表
+    db.execute('DELETE FROM mcp_configs WHERE user_id = ? AND auth_token_hash = ?', (uid, row['auth_token_hash']))
+    db.commit()
+    return jsonify({'ok': True})
 
 
 @app.route('/api/mcp/config', methods=['DELETE'])
 @login_required
 def mcp_config_delete():
-    """禁用当前用户的 MCP 接入"""
+    """禁用当前用户的全部 MCP 接入（吊销所有 Token）"""
     db = get_db()
+    db.execute('DELETE FROM mcp_tokens WHERE user_id = ?', (session['user_id'],))
     db.execute('DELETE FROM mcp_configs WHERE user_id = ?', (session['user_id'],))
     db.commit()
     return jsonify({'ok': True})

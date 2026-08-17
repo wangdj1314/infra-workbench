@@ -868,13 +868,14 @@ input,select,textarea{font-family:inherit;font-size:14px}
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
               <h4 style="font-size:14px;margin:0">MCP 服务端接入</h4>
               <div style="display:flex;gap:8px">
-                <button class="btn btn-primary-sm" id="mcpGenBtn" onclick="generateMcpToken()">+ 生成/重置 Token</button>
+                <button class="btn btn-primary-sm" id="mcpGenBtn" onclick="generateMcpToken()">+ 生成新 Token</button>
                 <button class="btn btn-sm" onclick="generateDeployDoc()">📄 生成部署文档(M 文件)</button>
               </div>
             </div>
             <p class="ai-hint" style="margin-bottom:10px">
               MCP（Model Context Protocol）让 AI 客户端直接操作你的工作台数据。每个用户独立鉴权，Token 严格隔离。<br>
               <b>接入方式</b>：在 WorkBuddy / Qoder / Cline / Claude Desktop 等客户端的 MCP 设置中，SSE 端点填写 <code id="mcpSseUrl"></code>，Token 填入下方生成的完整 Token。<br>
+              <b>多 Token</b>：可同时为多个 AI 工具各生成一个 Token（如 WorkBuddy 一个、Qoder 一个），互不影响、可单独吊销。<br>
               <b>部署文档</b>：点击「生成部署文档(M 文件)」，AI 会生成一份 Markdown 提示词文件，粘贴给你的 AI 工具即可自动同步企业工作内容（自动排除个人使用数据）。
             </p>
             <div id="mcpConfigPanel">
@@ -3403,7 +3404,7 @@ function renderMcpConfig() {
   const el = document.getElementById('mcpConfigPanel');
   if (!el || !mcpConfigCache) return;
   if (!mcpConfigCache.enabled) {
-    el.innerHTML = `<p class="ai-hint">尚未启用 MCP 接入。点击上方「生成/重置 Token」按钮创建独立鉴权 Token。</p>`;
+    el.innerHTML = `<p class="ai-hint">尚未启用 MCP 接入。点击上方「生成新 Token」按钮创建独立鉴权 Token（每个 AI 工具建议各用一个）。</p>`;
     return;
   }
   const base = location.origin;
@@ -3411,11 +3412,25 @@ function renderMcpConfig() {
   const toolsHtml = tools.length
     ? tools.map(t => `<span class="badge badge-tool" style="margin-right:4px">${escapeHtml(t)}</span>`).join('')
     : '<span class="ai-hint">暂无工具接入</span>';
+  // v25.9：多 Token 列表
+  const tokens = mcpConfigCache.tokens || [];
+  const tokensHtml = tokens.map(t => `
+    <tr>
+      <td><span class="badge badge-tool">${escapeHtml(t.label || '默认')}</span></td>
+      <td style="font-family:monospace;font-size:12px">${escapeHtml(t.token_masked)}</td>
+      <td style="font-size:12px;color:var(--muted)">${(t.created_at || '').substring(0, 16)}</td>
+      <td style="font-size:12px;color:var(--muted)">${t.last_used_at ? t.last_used_at.substring(0, 16) : '未使用'}</td>
+      <td><button class="btn btn-sm btn-danger-sm" style="padding:2px 8px;font-size:11px" onclick="deleteMcpToken(${t.id}, '${escapeHtml(t.label || '默认')}')">吊销</button></td>
+    </tr>`).join('');
   el.innerHTML = `
     <div class="sb-stat-row" style="margin-bottom:8px"><span>状态</span><span class="sb-stat-val" style="color:var(--success)">已启用</span></div>
-    <div class="sb-stat-row" style="margin-bottom:8px"><span>Token（脱敏）</span><span class="sb-stat-val">${escapeHtml(mcpConfigCache.token_masked || mcpConfigCache.token_prefix + '****')}</span></div>
-    <div class="sb-stat-row" style="margin-bottom:8px"><span>创建时间</span><span class="sb-stat-val">${mcpConfigCache.created_at || '-'}</span></div>
     <div class="sb-stat-row" style="margin-bottom:12px"><span>已接入工具</span><span class="sb-stat-val">${toolsHtml}</span></div>
+    <label style="font-size:13px;font-weight:600;display:block;margin-bottom:6px">MCP Token 列表（${tokens.length} 个）</label>
+    <table class="team-table" style="margin-bottom:12px">
+      <thead><tr><th>工具标签</th><th>Token（脱敏）</th><th>创建时间</th><th>最近使用</th><th style="width:60px">操作</th></tr></thead>
+      <tbody>${tokensHtml}</tbody>
+    </table>
+    <p class="ai-hint" style="margin-bottom:12px">每个 AI 工具（WorkBuddy / Qoder 等）建议使用独立 Token：单独吊销互不影响，且可通过「最近使用」区分来源。</p>
     <div class="form-row" style="margin-top:12px">
       <label>SSE 端点 URL</label>
       <input type="text" readonly value="${base}/mcp/sse" onclick="this.select()">
@@ -3425,14 +3440,17 @@ function renderMcpConfig() {
       <input type="text" readonly value="${base}/mcp/message?token=YOUR_TOKEN" onclick="this.select()">
     </div>
     <div style="margin-top:12px">
-      <button class="btn btn-sm btn-danger-sm" onclick="deleteMcpConfig()">禁用 MCP 接入</button>
+      <button class="btn btn-sm btn-danger-sm" onclick="deleteMcpConfig()">禁用 MCP 接入（吊销全部 Token）</button>
     </div>
   `;
 }
 async function generateMcpToken() {
-  if (!confirm('生成新 Token 将使旧 Token 立即失效，确认继续？')) return;
+  // v25.9：多 Token——生成前先选工具标签，旧 Token 不受影响
+  const raw = prompt('这个 Token 给哪个 AI 工具使用？（用于区分和管理）', 'Qoder');
+  if (raw === null) return;
+  const label = raw.trim() || '默认';
   try {
-    const data = await api('/api/mcp/config', {method:'POST'});
+    const data = await api('/api/mcp/config', {method:'POST', body: JSON.stringify({label})});
     // 刷新 MCP 配置面板
     await loadMcpConfig();
     // 弹出完整 Token 供用户复制
@@ -3440,7 +3458,7 @@ async function generateMcpToken() {
     const endpoint = data.endpoint || '';
     const hint = data.hint || '请妥善保存该 Token，系统只显示一次。';
     showModal(`
-      <h3 style="margin:0 0 16px;font-size:16px">MCP Token 已生成</h3>
+      <h3 style="margin:0 0 16px;font-size:16px">MCP Token 已生成 · ${escapeHtml(data.label || '默认')}</h3>
       <div style="margin-bottom:12px">
         <label style="font-size:13px;color:var(--text-secondary);display:block;margin-bottom:4px">Token（仅显示一次，请立即复制）</label>
         <div style="display:flex;gap:8px;align-items:center">
@@ -3468,8 +3486,15 @@ function copyMcpToken() {
     if (btn) { const old = btn.textContent; btn.textContent = '已复制'; setTimeout(() => btn.textContent = old, 1500); }
   });
 }
+async function deleteMcpToken(id, label) {
+  if (!confirm(`确认吊销「${label}」的 Token？该工具将无法继续连接（其他 Token 不受影响）。`)) return;
+  try {
+    await api(`/api/mcp/config/${id}`, {method:'DELETE'});
+    await loadMcpConfig();
+  } catch(err) { alert(err.message); }
+}
 async function deleteMcpConfig() {
-  if (!confirm('确认禁用 MCP 接入？禁用后所有已配置的 MCP 客户端将无法连接。')) return;
+  if (!confirm('确认禁用 MCP 接入？将吊销你的全部 Token，所有已配置的 MCP 客户端将无法连接。')) return;
   try {
     await api('/api/mcp/config', {method:'DELETE'});
     mcpConfigCache = null;
