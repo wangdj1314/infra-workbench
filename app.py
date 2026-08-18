@@ -233,6 +233,16 @@ def init_db():
                 "UPDATE users SET ad_username = 'chenxin6' WHERE display_name = '团队成员' AND ad_username = 'chenx'")
         except Exception:
             pass
+        # v28.3：安全团队账号与域控核对修正（池铭航=chimh；团队成员安全岗=zhengxy3，zhengxy 是物流部重名者）
+        try:
+            conn.execute(
+                "UPDATE users SET email = 'chenxin6@example.com' WHERE ad_username = 'chenxin6' AND email != 'chenxin6@example.com'")
+            conn.execute(
+                "UPDATE users SET ad_username = 'chimh', display_name = '池铭航', email = 'chimh@example.com' WHERE ad_username = 'chimx'")
+            conn.execute(
+                "UPDATE users SET ad_username = 'zhengxy3', email = 'zhengxy3@example.com' WHERE ad_username = 'zhengxy' AND team_id = (SELECT id FROM teams WHERE name = '信息安全团队')")
+        except Exception:
+            pass
         conn.commit()
         conn.close()
         print('[init_db] MySQL connection OK, seed data checked.')
