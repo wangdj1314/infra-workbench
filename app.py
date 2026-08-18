@@ -562,6 +562,18 @@ def ai_daily_suggest():
         return f"{int(mon)}月{int(day)}日({weekday}) {hm} {title}"
     cal_titles = [_fmt_cal(r['title'][:40], r['event_time']) for r in cal_rows if r['title']][:8]
 
+    # v27.2：iTop ITSM 工单（当前处理中 + 近7天已关闭）
+    itop_active = db.execute(
+        "SELECT title, status, SUBSTRING(last_update,1,10) as updated FROM itop_tickets "
+        "WHERE user_id=? AND status NOT IN ('resolved','closed','reject') ORDER BY last_update DESC LIMIT 10",
+        (uid,)
+    ).fetchall()
+    itop_recent = db.execute(
+        "SELECT title, SUBSTRING(close_date,1,10) as closed FROM itop_tickets "
+        "WHERE user_id=? AND status IN ('resolved','closed') AND close_date>=? ORDER BY close_date DESC LIMIT 5",
+        (uid, week_ago)
+    ).fetchall()
+
     summary = f"总任务{len(items)}条，待处理{len(pending)}条，逾期{len(overdue)}条，已完成{len(completed)}条。\n"
     summary += f"效率指标：平均完成耗时{round(avg_dur,1)}分钟，1小时内完成{fast_count}条，超8小时完成{slow_count}条。\n"
     if chat_topics:
@@ -570,6 +582,15 @@ def ai_daily_suggest():
         summary += f"近期待办（近7天）：{'；'.join(todo_titles)}\n"
     if cal_titles:
         summary += f"近期日程（近7天）：{'；'.join(cal_titles)}\n"
+    # v27.2：ITSM 工单
+    if itop_active:
+        summary += f"ITSM 工单（iTop）当前处理中 {len(itop_active)} 张："
+        for t in itop_active[:5]:
+            summary += f"- [{t['status']}] {t['title']}（更新{t['updated']}）\n"
+    if itop_recent:
+        summary += f"近7天已关闭 {len(itop_recent)} 张："
+        for t in itop_recent:
+            summary += f"- {t['title']}（关闭{t['closed']}）\n"
     summary += "待处理列表：\n"
     for p in pending[:10]:
         summary += f"- [{p['priority']}] {p['title']}（截止{p['due_date'] or '无'}）\n"
@@ -979,6 +1000,19 @@ def team_member_analysis(user_id):
     slow_count = sum(1 for i in completed if (i['actual_duration_minutes'] or 0) >= 480)
     recent_completed = [i for i in completed if i['completed_at'] and i['completed_at'][:10] >= (date.today() - timedelta(days=7)).isoformat()]
 
+    # v27.2：iTop ITSM 工单
+    week_ago = (date.today() - timedelta(days=7)).isoformat()
+    itop_active = db.execute(
+        "SELECT title, status, SUBSTRING(last_update,1,10) as updated FROM itop_tickets "
+        "WHERE user_id=? AND status NOT IN ('resolved','closed','reject') ORDER BY last_update DESC LIMIT 10",
+        (user_id,)
+    ).fetchall()
+    itop_recent = db.execute(
+        "SELECT title, SUBSTRING(close_date,1,10) as closed FROM itop_tickets "
+        "WHERE user_id=? AND status IN ('resolved','closed') AND close_date>=? ORDER BY close_date DESC LIMIT 5",
+        (user_id, week_ago)
+    ).fetchall()
+
     summary = f"员工：{user['display_name']}（{user['section_name']}）\n"
     summary += f"总任务{len(items)}条，已完成{len(completed)}条，待处理{len(pending)}条，逾期{len(overdue)}条。\n"
     summary += f"效率指标：平均完成耗时{round(avg_dur,1)}分钟，1小时内完成{fast_count}条，超8小时完成{slow_count}条，近7日完成{len(recent_completed)}条。\n"
@@ -989,6 +1023,15 @@ def team_member_analysis(user_id):
     for c in completed[:5]:
         dur = f"，耗时{c['actual_duration_minutes']}分钟" if c['actual_duration_minutes'] else ""
         summary += f"- {c['title']}{dur}\n"
+    # v27.2：ITSM 工单
+    if itop_active:
+        summary += f"\nITSM 工单（iTop）当前处理中 {len(itop_active)} 张：\n"
+        for t in itop_active[:5]:
+            summary += f"- [{t['status']}] {t['title']}（更新{t['updated']}）\n"
+    if itop_recent:
+        summary += f"近7天已关闭 {len(itop_recent)} 张：\n"
+        for t in itop_recent:
+            summary += f"- {t['title']}（关闭{t['closed']}）\n"
 
     system = (
         '你是基础架构运维团队的管理顾问。根据员工的工作数据和效率指标，给出专业的工作意见分析，包括：'
@@ -1064,6 +1107,18 @@ def team_member_job_analysis(user_id):
         return f"{int(mon)}月{int(day)}日({weekday}) {hm} {title}"
     cal_titles = [_fmt_cal(r['title'][:40], r['event_time']) for r in cal_rows if r['title']][:6]
 
+    # v27.2：iTop ITSM 工单
+    itop_active = db.execute(
+        "SELECT title, status, SUBSTRING(last_update,1,10) as updated FROM itop_tickets "
+        "WHERE user_id=? AND status NOT IN ('resolved','closed','reject') ORDER BY last_update DESC LIMIT 10",
+        (user_id,)
+    ).fetchall()
+    itop_recent = db.execute(
+        "SELECT title, SUBSTRING(close_date,1,10) as closed FROM itop_tickets "
+        "WHERE user_id=? AND status IN ('resolved','closed') AND close_date>=? ORDER BY close_date DESC LIMIT 5",
+        (user_id, week_ago)
+    ).fetchall()
+
     # v20：只分析该成员本人的工作，不再引入其他成员/推荐协同转办
     work_summary = '\n'.join(
         f"- [{i['priority']}] {i['title']}（分类：{i['category']}）"
@@ -1084,6 +1139,15 @@ def team_member_job_analysis(user_id):
         prompt += f"近期待办：{'；'.join(todo_titles)}\n"
     if cal_titles:
         prompt += f"近期日程：{'；'.join(cal_titles)}\n"
+    # v27.2：ITSM 工单
+    if itop_active:
+        prompt += f"ITSM 工单（iTop）当前处理中 {len(itop_active)} 张："
+        for t in itop_active[:5]:
+            prompt += f"- [{t['status']}] {t['title']}（更新{t['updated']}）\n"
+    if itop_recent:
+        prompt += f"近7天已关闭 {len(itop_recent)} 张："
+        for t in itop_recent:
+            prompt += f"- {t['title']}（关闭{t['closed']}）\n"
     prompt += (
         f"\n请只针对该员工本人，根据其岗位描述、负责板块及近期工作上下文，分析其当前工作状况，给出："
         f"1) 工作负荷评估（待处理数量、优先级分布、是否存在积压）；"
