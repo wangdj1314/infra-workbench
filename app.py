@@ -169,6 +169,46 @@ def init_db():
                     (_desc, _kw))
         except Exception:
             pass
+        # v28.2：模型供应商表
+        conn.execute('''CREATE TABLE IF NOT EXISTS model_providers (
+            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+            name VARCHAR(100) NOT NULL,
+            base_url VARCHAR(500) NOT NULL,
+            api_key VARCHAR(500) DEFAULT '',
+            model VARCHAR(100) NOT NULL,
+            is_default INTEGER DEFAULT 0,
+            created_by INTEGER DEFAULT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        # v28.2：users 表增加 preferred_provider_id 列
+        try:
+            conn.execute('ALTER TABLE users ADD COLUMN preferred_provider_id INTEGER DEFAULT NULL')
+        except Exception:
+            pass  # 列已存在
+        # v28.2：初始化默认模型供应商（幂等）
+        try:
+            pc = conn.execute('SELECT COUNT(*) as c FROM model_providers').fetchone()['c']
+            if pc == 0:
+                conn.execute(
+                    'INSERT INTO model_providers (name, base_url, api_key, model, is_default) VALUES (?, ?, ?, ?, ?)',
+                    ('Qwen3.6 (默认)', 'http://YOUR_AI_IP:9997/v1', '', 'qwen3.6', 1))
+                conn.execute(
+                    'INSERT INTO model_providers (name, base_url, api_key, model, is_default) VALUES (?, ?, ?, ?, ?)',
+                    ('Qwen3.8-27B', 'http://YOUR_AI_IP:8001/v1', '', 'qwen3.8-27b', 0))
+        except Exception:
+            pass
+        # v28.2：分配基础架构团队成员
+        try:
+            infra_team = conn.execute("SELECT id FROM teams WHERE name = '基础架构团队'").fetchone()
+            if infra_team:
+                infra_id = infra_team['id']
+                infra_names = ['团队成员', '团队成员', '团队成员', '团队成员', '团队成员', '团队成员', '团队成员', '团队成员']
+                for _nm in infra_names:
+                    conn.execute(
+                        "UPDATE users SET team_id = ? WHERE display_name LIKE '%' || ? || '%' AND (team_id IS NULL OR team_id != ?)",
+                        (infra_id, _nm, infra_id))
+        except Exception:
+            pass
         conn.commit()
         conn.close()
         print('[init_db] MySQL connection OK, seed data checked.')
@@ -396,12 +436,21 @@ def health_check():
 # ====================================================================
 # AI 能力（Xinference / OpenAI 兼容）—— 带 Token 计数
 # ====================================================================
-def ai_chat(system, user, max_tokens=800, feature='unknown'):
-    """调用 AI 并记录 token 消耗"""
+def ai_chat(system, user, max_tokens=800, feature='unknown', provider=None):
+    """调用 AI 并记录 token 消耗。provider 可选: {'base_url','api_key','model'}"""
+    if provider is None:
+        provider = _get_user_provider()
+    base_url = provider['base_url'] if provider else AI_BASE_URL
+    model = provider['model'] if provider else AI_MODEL
+    api_key = (provider.get('api_key', '') if provider else '')
+    headers = {'Content-Type': 'application/json'}
+    if api_key:
+        headers['Authorization'] = f'Bearer {api_key}'
     resp = requests.post(
-        f'{AI_BASE_URL}/chat/completions',
+        f'{base_url}/chat/completions',
+        headers=headers,
         json={
-            'model': AI_MODEL,
+            'model': model,
             'messages': [
                 {'role': 'system', 'content': system},
                 {'role': 'user', 'content': user}
@@ -426,13 +475,35 @@ def ai_chat(system, user, max_tokens=800, feature='unknown'):
              usage.get('prompt_tokens', 0),
              usage.get('completion_tokens', 0),
              usage.get('total_tokens', 0),
-             AI_MODEL)
+             model)
         )
         conn.commit()
         conn.close()
     except Exception as e:
         print(f'[ai_usage] 记录失败: {e}')
     return content
+
+
+def _get_user_provider():
+    """获取当前用户偏好的模型供应商，返回 dict 或 None（使用默认）"""
+    try:
+        uid = session.get('user_id')
+        if not uid:
+            return None
+        conn = sqlite3.connect()
+        user = conn.execute('SELECT preferred_provider_id FROM users WHERE id = ?', (uid,)).fetchone()
+        conn.close()
+        if not user or not user['preferred_provider_id']:
+            return None
+        conn = sqlite3.connect()
+        p = conn.execute('SELECT base_url, api_key, model FROM model_providers WHERE id = ?',
+                         (user['preferred_provider_id'],)).fetchone()
+        conn.close()
+        if p:
+            return {'base_url': p['base_url'], 'api_key': p.get('api_key', ''), 'model': p['model']}
+    except Exception:
+        pass
+    return None
 
 
 @app.route('/api/ai/describe', methods=['POST'])
@@ -6488,6 +6559,109 @@ def team_member_itop(uid):
         'FROM itop_tickets WHERE user_id = ? ORDER BY last_update DESC LIMIT 100',
         (uid,)).fetchall()
     return jsonify([dict(r) for r in rows])
+
+
+# ====================================================================
+# v28.2：模型供应商管理
+# ====================================================================
+@app.route('/api/model-providers')
+@login_required
+def list_model_providers():
+    """获取所有模型供应商（所有用户可见）"""
+    db = get_db()
+    rows = db.execute('SELECT * FROM model_providers ORDER BY is_default DESC, id ASC').fetchall()
+    providers = []
+    for r in rows:
+        p = dict(r)
+        # 隐藏完整 api_key，只显示前4位
+        if p.get('api_key') and len(p['api_key']) > 8:
+            p['api_key_masked'] = p['api_key'][:4] + '****'
+        else:
+            p['api_key_masked'] = '(无)'
+        providers.append(p)
+    # 获取当前用户偏好
+    uid = session.get('user_id')
+    preferred_id = None
+    if uid:
+        u = db.execute('SELECT preferred_provider_id FROM users WHERE id = ?', (uid,)).fetchone()
+        if u:
+            preferred_id = u['preferred_provider_id']
+    return jsonify({'providers': providers, 'preferred_id': preferred_id})
+
+
+@app.route('/api/model-providers', methods=['POST'])
+@admin_required
+def create_model_provider():
+    """创建模型供应商（管理员）"""
+    data = request.get_json(silent=True) or {}
+    name = (data.get('name') or '').strip()
+    base_url = (data.get('base_url') or '').strip()
+    api_key = (data.get('api_key') or '').strip()
+    model = (data.get('model') or '').strip()
+    if not name or not base_url or not model:
+        return jsonify({'error': '名称、Base URL、模型不能为空'}), 400
+    db = get_db()
+    db.execute(
+        'INSERT INTO model_providers (name, base_url, api_key, model, created_by) VALUES (?, ?, ?, ?, ?)',
+        (name, base_url, api_key, model, session.get('user_id')))
+    db.commit()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/model-providers/<int:pid>', methods=['PUT'])
+@admin_required
+def update_model_provider(pid):
+    """更新模型供应商（管理员）"""
+    data = request.get_json(silent=True) or {}
+    db = get_db()
+    p = db.execute('SELECT * FROM model_providers WHERE id = ?', (pid,)).fetchone()
+    if not p:
+        return jsonify({'error': '供应商不存在'}), 404
+    name = (data.get('name') or p['name']).strip()
+    base_url = (data.get('base_url') or p['base_url']).strip()
+    model = (data.get('model') or p['model']).strip()
+    api_key = data.get('api_key')  # None = 不修改
+    if api_key is None:
+        api_key = p['api_key']
+    db.execute(
+        'UPDATE model_providers SET name=?, base_url=?, api_key=?, model=? WHERE id=?',
+        (name, base_url, api_key, model, pid))
+    db.commit()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/model-providers/<int:pid>', methods=['DELETE'])
+@admin_required
+def delete_model_provider(pid):
+    """删除模型供应商（管理员）"""
+    db = get_db()
+    p = db.execute('SELECT * FROM model_providers WHERE id = ?', (pid,)).fetchone()
+    if not p:
+        return jsonify({'error': '供应商不存在'}), 404
+    if p['is_default']:
+        return jsonify({'error': '默认供应商不能删除'}), 400
+    # 清除引用该供应商的用户偏好
+    db.execute('UPDATE users SET preferred_provider_id = NULL WHERE preferred_provider_id = ?', (pid,))
+    db.execute('DELETE FROM model_providers WHERE id = ?', (pid,))
+    db.commit()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/model-providers/preference', methods=['PUT'])
+@login_required
+def set_model_provider_preference():
+    """设置当前用户偏好的模型供应商"""
+    data = request.get_json(silent=True) or {}
+    provider_id = data.get('provider_id')  # None = 使用默认
+    db = get_db()
+    if provider_id is not None:
+        p = db.execute('SELECT id FROM model_providers WHERE id = ?', (provider_id,)).fetchone()
+        if not p:
+            return jsonify({'error': '供应商不存在'}), 404
+    db.execute('UPDATE users SET preferred_provider_id = ? WHERE id = ?',
+               (provider_id, session['user_id']))
+    db.commit()
+    return jsonify({'ok': True})
 
 
 # ====================================================================

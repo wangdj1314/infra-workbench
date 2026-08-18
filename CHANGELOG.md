@@ -2,6 +2,18 @@
 
 版本规则：主版本号跟随年份迭代（v25.x → v26.0），功能变更在本文件登记。
 
+## v28.2（2026-08-18）
+
+### 新增：团队概览分栏 + 模型供应商管理
+- **团队概览分栏**：团队概览页按团队分组显示成员卡片，每个团队独立区块，未分配团队的用户归入「未分配团队」区
+- **模型供应商管理**：API 设置页新增「模型供应商」区块，支持 OpenAI 兼容接口的模型接入
+  - 默认预置 Qwen3.6（系统默认）和 Qwen3.8-27B 两个供应商
+  - 管理员可添加/删除自定义供应商（名称、Base URL、API Key、模型名）
+  - 所有用户可选择自己偏好的模型，AI 调用自动使用所选模型
+- **数据模型**：新增 `model_providers` 表（id/name/base_url/api_key/model/is_default/created_by），`users` 表新增 `preferred_provider_id` 列
+- **API**：`GET/POST/PUT/DELETE /api/model-providers`、`PUT /api/model-providers/preference`
+- **基础架构团队**：init_db 自动分配基础架构团队成员（团队成员、团队成员、团队成员、团队成员、团队成员、团队成员、团队成员、团队成员）
+
 ## v28.1（2026-08-18）
 
 ### 增强：权限隔离与团队分栏
