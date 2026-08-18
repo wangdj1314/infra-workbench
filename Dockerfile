@@ -12,6 +12,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy app files
 COPY app.py .
 COPY static/ static/
+COPY _db_shim.py .
+COPY mcp_client.py .
 
 # Create data directory for SQLite
 RUN mkdir -p /app/data
@@ -22,4 +24,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')" || exit 1
 
-CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:8080", "--timeout", "120", "--access-logfile", "-", "app:app"]
+CMD ["gunicorn", "-w", "2", "-k", "gthread", "--threads", "8", "-b", "0.0.0.0:8080", "--timeout", "120", "--access-logfile", "-", "app:app"]

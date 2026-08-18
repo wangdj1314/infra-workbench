@@ -28,10 +28,17 @@
 
 ### 团队概览
 - 团队成员工作量统计（含协同者任务）
-- 每员工 Token 今日/本月消耗 + MCP 接入状态
+- 每员工 Token 今日/本月消耗 + MCP 接入状态 + ITSM 工单统计（处理中/本月完成）
 - 用户活跃度追踪（登录次数、页面访问、使用时长）
 - 任务完成率看板
 - 近7天完成趋势图
+
+### iTop ITSM 工单集成（v27.0）
+- **MCP 调用能力**：内置 `mcp_client.py` 通用 MCP 客户端（Streamable HTTP transport，会话管理 + SSE 解析 + 失效自动重连），后端可调用任意外部 MCP 服务
+- **工单同步**：定时拉取 iTop 四类工单（服务请求/事件/问题/变更）；工作时间每小时增量（近2天），非工时每天一次；支持手动全量（近90天）
+- **工单处理**：详情弹窗查看描述/解决方案/处理日志，可直接添加日志、执行流转（写回 iTop，动作由 iTop 状态机校验）
+- **工程师映射**：iTop 工程师 → 工作台用户，姓名自动匹配（支持 "EN-中文名"）+ 管理端手动兜底
+- **统计与报告**：个人/团队统计卡、日报周报月报均纳入工单维度
 
 ### MCP Server 接入
 - **标准 SSE 协议**：兼容 QoderWork、WorkBuddy 等标准 MCP 客户端
@@ -100,16 +107,20 @@ MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'workbench')
 # 钉钉 DWS 路径
 DWS_BIN = '/app/data/dws_bin/dws'
 DWS_TOKEN_DIR = '/app/data/dws_tokens'  # per-user: <dir>/<user_id>
+
+# iTop MCP 服务（v27.0 ITSM 工单同步）
+ITOP_MCP_URL = os.environ.get('ITOP_MCP_URL', 'http://YOUR_SERVER_IP:8003/mcp')
 ```
 
 ## 项目结构
 
 ```
 infra-workbench/
-├── app.py              # Flask 主应用 (~5400 行)
+├── app.py              # Flask 主应用 (~5800 行)
 ├── _db_shim.py         # MySQL 兼容层（datetime/date→str, close()幂等）
+├── mcp_client.py       # MCP HTTP 客户端（Streamable HTTP，v27.0）
 ├── static/
-│   └── index.html      # 单文件 SPA 前端 (~4500 行)
+│   └── index.html      # 单文件 SPA 前端 (~5100 行)
 ├── data/               # 数据目录（MySQL 数据在 workbench-mysql 容器）
 │   ├── dws_bin/        # DWS CLI 二进制
 │   ├── dws_tokens/     # per-user DWS token 目录
@@ -143,9 +154,13 @@ v26.x 从 SQLite 迁移至 MySQL 8.0。通过 `_db_shim.py` 兼容层，原有 S
 
 详见 [CHANGELOG.md](CHANGELOG.md)
 
-### v26.6 (当前版本)
+### v27.0 (当前版本)
+- **iTop ITSM 工单集成**：MCP 调用能力（mcp_client.py）+ 四类工单定时同步 + 工作台处理工单（日志/流转写回）+ 工程师映射 + 统计与报告整合
+
+### v26.6 - v26.7
 - **修复 DWS 同步 0 条**：MySQL 迁移后 `ON CONFLICT` 语法导致写入失败（1064），改为 `ON DUPLICATE KEY UPDATE` + 补唯一索引
 - **编辑工作内容弹窗**：新增 AI 润色 + 填入按钮
+- **修复平均耗时统计为 0**：完成时用 `created_at` 兜底起始时间
 
 ### v26.0 - v26.5
 - MCP 标准 SSE 协议（兼容 QoderWork/WorkBuddy）

@@ -7,7 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <title>基础架构工作台</title>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=26.7">
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=27.0">
 <style>
 :root{
   --bg:#0d1117;--surface:#161b22;--surface2:#21262d;--border:#30363d;
@@ -611,7 +611,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="login-card">
     <div class="login-logo">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <h1>基础架构工作台 <span class="version-badge">v26.7</span></h1>
+      <h1>基础架构工作台 <span class="version-badge">v27.0</span></h1>
       <p>Infrastructure Team Workbench</p>
     </div>
     <div id="loginError" class="login-error hidden"></div>
@@ -636,7 +636,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="topbar">
     <div class="topbar-left">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" style="width:22px;height:22px"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v26.7">v26.7</span>
+      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v27.0">v27.0</span>
     </div>
     <div class="topbar-right">
       <div class="ai-token-badge" onclick="switchTab('apikey')" title="AI Token 消耗">
@@ -685,6 +685,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
       <div class="tabs" id="tabs">
         <div class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">我的工作台</div>
         <div class="tab" data-tab="reports" onclick="switchTab('reports')">报告</div>
+        <div class="tab" data-tab="itop" onclick="switchTab('itop')">ITSM 工单</div>
         <div class="tab hidden" data-tab="team" onclick="switchTab('team')">团队概览</div>
         <div class="tab hidden" data-tab="members" onclick="switchTab('members')">成员管理</div>
         <div class="tab hidden" data-tab="manage" onclick="switchTab('manage')">工作内容管理</div>
@@ -741,6 +742,38 @@ input,select,textarea{font-family:inherit;font-size:14px}
             <h2>团队成员工作概览</h2>
           </div>
           <div class="member-cards" id="memberCards"></div>
+        </div>
+
+        <!-- v27.0 ITSM 工单 Tab -->
+        <div id="tab-itop" class="hidden">
+          <div class="section-header">
+            <h2>ITSM 工单（iTop · MCP 同步）</h2>
+            <div>
+              <button class="btn" onclick="itopSyncNow('incremental')">增量同步</button>
+              <button class="btn" onclick="itopSyncNow('full')">全量同步(90天)</button>
+            </div>
+          </div>
+          <div class="stats-grid" id="itopStats"></div>
+          <div class="filter-bar">
+            <button class="filter-btn active" data-ist="active" onclick="itopSetStatus('active',this)">处理中</button>
+            <button class="filter-btn" data-ist="closed" onclick="itopSetStatus('closed',this)">已完结</button>
+            <button class="filter-btn" data-ist="" onclick="itopSetStatus('',this)">全部</button>
+            <select id="itopClassSel" onchange="itopSetClass(this.value)" style="margin-left:8px">
+              <option value="">全部类型</option>
+              <option value="UserRequest">服务请求</option>
+              <option value="Incident">事件</option>
+              <option value="Problem">问题</option>
+              <option value="Change">变更</option>
+            </select>
+            <input type="text" id="itopSearch" placeholder="搜索工单号/标题" style="margin-left:8px;width:180px" onkeydown="if(event.key==='Enter')itopDoSearch()">
+            <button class="btn btn-sm" onclick="itopDoSearch()">搜索</button>
+            <label id="itopScopeLabel" style="margin-left:auto;font-size:12px;color:var(--muted)"><input type="checkbox" id="itopScope" onchange="loadItopTickets()"> 管理员：查看全团队</label>
+          </div>
+          <div id="itopTickets"></div>
+          <div class="section-header" id="itopAdminBox" style="display:none">
+            <h2>工程师映射（iTop → 工作台）</h2>
+          </div>
+          <div id="itopUserMap"></div>
         </div>
 
         <!-- Members Tab -->
@@ -1136,6 +1169,7 @@ function switchTab(tab) {
   logActivity('page_view', tab);
   if (tab === 'dashboard') loadDashboard();
   if (tab === 'reports') loadReports();
+  if (tab === 'itop') loadItopTickets();
   if (tab === 'team') loadTeamOverview();
   if (tab === 'members') loadMembers();
   if (tab === 'manage') loadAdminWorkItems();
@@ -1200,9 +1234,237 @@ function renderStats(elId, stats) {
   if (stats.today_completed !== undefined) {
     cards.push({label:'今日完成', value:stats.today_completed, cls:'success'});
   }
+  // v27.0：ITSM 工单统计
+  if (stats.itop_active !== undefined) {
+    cards.push({label:'处理中工单', value:stats.itop_active, cls:stats.itop_active>0?'primary':''});
+    cards.push({label:'今日完成工单', value:stats.itop_today_closed, cls:stats.itop_today_closed>0?'success':''});
+    cards.push({label:'本月完成工单', value:stats.itop_month_closed, cls:''});
+  }
   document.getElementById(elId).innerHTML = cards.map(c =>
     `<div class="stat-card ${c.cls}"><div class="stat-value">${c.value}</div><div class="stat-label">${c.label}</div></div>`
   ).join('');
+}
+
+
+// ---- v27.0 ITSM 工单（iTop MCP） ----
+let itopFilter = {status:'active', ticket_class:'', q:''};
+const ITOP_CLASS_LABEL = {UserRequest:'服务请求', Incident:'事件', Problem:'问题', Change:'变更'};
+const ITOP_STATUS_LABEL = {new:'新建', assigned:'已指派', pending:'挂起', resolved:'已解决', closed:'已关闭',
+  reject:'已拒绝', in_process:'处理中', waiting_for_approval:'待审批', implemented:'已实施',
+  approved:'已审批', planned:'已计划', accepted:'已验收'};
+const ITOP_STIMULUS_OPTS = [
+  ['ev_assign','指派/受理'], ['ev_pending','挂起等待'], ['ev_resolve','标记解决'],
+  ['ev_close','关闭工单'], ['ev_reopen','重新打开'], ['ev_reassign','转派']];
+
+function itopStatusText(s){ return ITOP_STATUS_LABEL[s] || s || '-'; }
+function itopClassText(c){ return ITOP_CLASS_LABEL[c] || c || '-'; }
+
+function itopSetStatus(s, btn) {
+  itopFilter.status = s;
+  document.querySelectorAll('[data-ist]').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  loadItopTickets();
+}
+function itopSetClass(v) { itopFilter.ticket_class = v; loadItopTickets(); }
+function itopDoSearch() { itopFilter.q = document.getElementById('itopSearch').value.trim(); loadItopTickets(); }
+
+async function loadItopStatus() {
+  try {
+    const d = await api('/api/itop/status');
+    let active = 0, closed = 0;
+    Object.values(d.by_class || {}).forEach(b => { active += (b.active||0); closed += (b.closed||0); });
+    const st = d.sync_state || {};
+    const cards = [
+      {label:'工单总数', value:d.total, cls:''},
+      {label:'处理中', value:active, cls:active>0?'primary':''},
+      {label:'已完结', value:closed, cls:'success'},
+      {label:'未映射工程师', value:(d.unmapped_agents||[]).length, cls:(d.unmapped_agents||[]).length>0?'warning':''},
+    ];
+    const syncLine = st.running ? '同步进行中...' : ('上次数据更新 ' + (d.last_data_at || '无').substring(5, 16));
+    document.getElementById('itopStats').innerHTML =
+      cards.map(c => `<div class="stat-card ${c.cls}"><div class="stat-value">${c.value}</div><div class="stat-label">${c.label}</div></div>`).join('')
+      + `<div style="grid-column:1/-1;font-size:11px;color:var(--muted)">${syncLine} · 来源 ${escapeHtml(d.mcp_url||'')}</div>`;
+  } catch(err) { /* 静默 */ }
+}
+
+async function loadItopTickets() {
+  loadItopStatus();
+  if (currentUser && currentUser.is_admin) {
+    document.getElementById('itopAdminBox').style.display = '';
+  } else {
+    const sl = document.getElementById('itopScopeLabel');
+    if (sl) sl.style.display = 'none';
+  }
+  const params = new URLSearchParams({status: itopFilter.status, ticket_class: itopFilter.ticket_class, q: itopFilter.q, limit: 100});
+  if (currentUser && currentUser.is_admin) {
+    const scopeEl = document.getElementById('itopScope');
+    if (scopeEl && scopeEl.checked) params.set('scope', 'team');
+  }
+  try {
+    const data = await api('/api/itop/tickets?' + params.toString());
+    const items = data.items || [];
+    const el = document.getElementById('itopTickets');
+    if (!items.length) {
+      el.innerHTML = '<div class="empty"><p>暂无工单（同步范围：近90天）</p></div>';
+    } else {
+      el.innerHTML = items.map(t => `
+        <div style="cursor:pointer;border:1px solid rgba(128,128,128,.25);background:rgba(128,128,128,.04);border-radius:8px;padding:10px 12px;margin-bottom:8px" onclick="showItopTicketModal('${t.ticket_class}','${t.ticket_ref}')">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+            <div style="flex:1;min-width:200px">
+              <div style="font-weight:600">${escapeHtml(t.title || '')}</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:2px">
+                ${escapeHtml(t.ticket_ref)} · ${itopClassText(t.ticket_class)} · ${itopStatusText(t.status)}
+                ${t.agent_name ? ' · 工程师 ' + escapeHtml(t.agent_name) : ''}
+              </div>
+            </div>
+            <span style="font-size:11px;color:var(--muted)">${escapeHtml((t.last_update || '').substring(5, 16))}</span>
+          </div>
+        </div>`).join('')
+        + `<div style="font-size:11px;color:var(--muted);margin-top:6px">共 ${data.total} 张工单</div>`;
+    }
+  } catch(err) {
+    document.getElementById('itopTickets').innerHTML = `<div class="empty"><p>加载失败：${escapeHtml(err.message)}</p></div>`;
+  }
+  if (currentUser && currentUser.is_admin) loadItopUserMap();
+}
+
+async function showItopTicketModal(cls, ref) {
+  try {
+    const t = await api(`/api/itop/tickets/${cls}/${ref}`);
+    const raw = t.raw || {};
+    const logs = ((raw.public_log && raw.public_log.entries) || (raw.private_log && raw.private_log.entries) || []);
+    const logHtml = logs.length ? logs.slice(-10).map(e => `
+      <div style="border-left:3px solid var(--primary);padding:4px 8px;margin:4px 0;font-size:12px">
+        <div style="color:var(--muted)">${escapeHtml(String(e.date || '').substring(0, 16))} · ${escapeHtml(e.user_friendlyname || e.user || '')}</div>
+        <div style="white-space:pre-wrap">${escapeHtml(e.message || e.text || '')}</div>
+      </div>`).join('') : '<p style="color:var(--muted);font-size:12px">暂无日志</p>';
+    window._itopCur = {cls, ref: t.ticket_ref, status: t.status};
+    showModal(`
+      <div class="modal-header"><h3>${escapeHtml(t.ticket_ref)} · ${itopClassText(t.ticket_class)}</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+      <div class="modal-body">
+        <h4 style="margin:0 0 6px">${escapeHtml(t.title || '')}</h4>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:8px">
+          状态：${itopStatusText(t.status)} · 优先级：${escapeHtml(String(t.priority || '-'))} · 工程师：${escapeHtml(t.agent_name || '未指派')}<br>
+          发起人：${escapeHtml(t.caller_name || '-')} · 组织：${escapeHtml(t.org_name || '-')} · 服务：${escapeHtml(t.service_name || '-')}<br>
+          开始：${escapeHtml((t.start_date || '').substring(0, 16))} · 解决：${escapeHtml((t.resolution_date || '').substring(0, 16))} · 关闭：${escapeHtml((t.close_date || '').substring(0, 16))}
+        </div>
+        ${t.description ? `<div style="font-size:13px;max-height:140px;overflow:auto;border:1px solid rgba(128,128,128,.25);border-radius:6px;padding:8px;white-space:pre-wrap">${escapeHtml(t.description).substring(0, 2000)}</div>` : ''}
+        ${t.solution ? `<div style="margin-top:8px"><strong style="font-size:12px">解决方案</strong><div style="font-size:13px;max-height:120px;overflow:auto;border:1px solid rgba(128,128,128,.25);border-radius:6px;padding:8px;white-space:pre-wrap">${escapeHtml(t.solution).substring(0, 1500)}</div></div>` : ''}
+        <div style="margin-top:10px"><strong style="font-size:12px">处理日志</strong>${logHtml}</div>
+        <div style="margin-top:10px;border-top:1px solid rgba(128,128,128,.25);padding-top:10px">
+          <strong style="font-size:12px">添加日志（写回 iTop）</strong>
+          <textarea id="itopLogMsg" style="width:100%;min-height:60px;margin-top:6px" placeholder="处理说明..."></textarea>
+          <label style="font-size:12px"><input type="checkbox" id="itopLogPrivate"> 私有日志</label>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal()">关闭</button>
+        <button class="btn btn-sm" onclick="itopApplyStimulusGo()">流转</button>
+        <button class="btn btn-primary-sm" onclick="itopSubmitLog('${cls}','${t.ticket_ref}')">提交日志</button>
+      </div>
+    `);
+  } catch(err) { alert(err.message); }
+}
+
+async function itopSubmitLog(cls, ref) {
+  const msg = document.getElementById('itopLogMsg').value.trim();
+  if (!msg) { alert('请输入日志内容'); return; }
+  try {
+    await api(`/api/itop/tickets/${cls}/${ref}/log`, {method:'POST', body: JSON.stringify({
+      message: msg, private: document.getElementById('itopLogPrivate').checked})});
+    alert('日志已写回 iTop');
+    showItopTicketModal(cls, ref);
+    loadItopTickets();
+  } catch(err) { alert('写回失败：' + err.message); }
+}
+
+function itopApplyStimulusGo() {
+  const cur = window._itopCur;
+  if (!cur) return;
+  showModal(`
+    <div class="modal-header"><h3>工单流转 · ${escapeHtml(cur.ref)}</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <div class="form-row"><label>流转动作</label>
+        <select id="itopStimulus">${ITOP_STIMULUS_OPTS.map(o => `<option value="${o[0]}">${o[1]}（${o[0]}）</option>`).join('')}</select></div>
+      <div class="form-row"><label>备注（可选）</label><textarea id="itopStimComment" style="min-height:60px"></textarea></div>
+      <p class="ai-hint">动作是否可用由 iTop 当前状态（${itopStatusText(cur.status)}）决定，失败时会提示原因。</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary-sm" onclick="itopSubmitStimulus()">执行流转</button>
+    </div>
+  `);
+}
+
+async function itopSubmitStimulus() {
+  const cur = window._itopCur;
+  if (!cur) return;
+  const stim = document.getElementById('itopStimulus').value;
+  const cmt = document.getElementById('itopStimComment').value.trim();
+  try {
+    await api(`/api/itop/tickets/${cur.cls}/${cur.ref}/stimulus`, {method:'POST', body: JSON.stringify({
+      stimulus: stim, comment: cmt})});
+    closeModal();
+    alert('流转成功');
+    loadItopTickets();
+  } catch(err) { alert('流转失败：' + err.message); }
+}
+
+async function itopSyncNow(mode) {
+  if (mode === 'full' && !confirm('全量同步将拉取近90天全部四类工单，可能耗时1-2分钟，继续？')) return;
+  try {
+    const d = await api('/api/itop/sync', {method:'POST', body: JSON.stringify({mode})});
+    if (d.status === 'started') {
+      alert('同步已启动，稍后自动刷新');
+      setTimeout(loadItopStatus, 3000);
+      setTimeout(loadItopTickets, 8000);
+    } else {
+      alert('同步状态：' + (d.status || ''));
+    }
+  } catch(err) { alert('同步失败：' + err.message); }
+}
+
+async function loadItopUserMap() {
+  try {
+    if (!membersCache || !membersCache.length) {
+      try {
+        const ts = await api('/api/stats?team=1');
+        membersCache = (ts.user_stats || []);
+      } catch(e) { /* ignore */ }
+    }
+    const d = await api('/api/itop/user-map');
+    const maps = d.mappings || [];
+    const agents = d.agents || [];
+    const userOpts = (membersCache || []).map(u => `<option value="${u.id}">${escapeHtml(u.display_name)}</option>`).join('');
+    const rows = agents.map(a => {
+      const m = maps.find(x => x.itop_agent_name === a.agent_name);
+      const cur = (m && m.user_id) ? (m.display_name || ('用户#' + m.user_id)) : '';
+      const canAuto = (membersCache || []).some(u =>
+        (u.display_name || '').endsWith('-' + a.agent_name) || u.display_name === a.agent_name);
+      const label = cur || (canAuto ? '自动匹配' : '未映射');
+      return `<tr>
+        <td>${escapeHtml(a.agent_name)}</td>
+        <td>${a.c}</td>
+        <td>
+          <select onchange="itopSetMap('${escapeHtml(a.agent_name)}', this.value)">
+            <option value="">${label}</option>
+            ${userOpts}
+          </select>
+        </td>
+      </tr>`;
+    }).join('');
+    document.getElementById('itopUserMap').innerHTML = agents.length ? `
+      <table class="team-table"><thead><tr><th>iTop 工程师</th><th>工单数</th><th>映射到工作台用户</th></tr></thead><tbody>${rows}</tbody></table>
+      <p class="ai-hint">仅本团队成员需要映射；统计只计入映射到工作台用户的工单。选择第一项可清除映射（恢复自动匹配）。</p>` : '';
+  } catch(err) { /* 静默 */ }
+}
+
+async function itopSetMap(name, uid) {
+  try {
+    await api('/api/itop/user-map', {method:'POST', body: JSON.stringify({
+      itop_agent_name: name, user_id: uid ? parseInt(uid) : null})});
+    loadItopTickets();
+  } catch(err) { alert('设置失败：' + err.message); }
 }
 
 // ---- Work Items ----
@@ -3200,6 +3462,10 @@ async function loadTeamOverview() {
         <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:4px">
           <span>Token 今: <strong style="color:var(--ai)">${fmtTokens(u.today_tokens)}</strong> / 月: <strong>${fmtTokens(u.month_tokens)}</strong></span>
           <span>${u.mcp_count ? `MCP: <strong style="color:var(--success)">${u.mcp_count}个接入</strong>${u.mcp_last_used ? ' (' + escapeHtml(String(u.mcp_last_used).substring(5, 10)) + ')' : ''}` : 'MCP: <span style="color:var(--muted)">未接入</span>'}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:4px">
+          <span>ITSM: 处理中 <strong style="color:var(--primary)">${u.itop_active||0}</strong></span>
+          <span>本月完成工单 <strong style="color:var(--success)">${u.itop_month_closed||0}</strong></span>
         </div>
         <p style="font-size:12px;color:var(--muted);margin-top:4px">完成率 ${rate}% &middot; 点击查看详情</p>
       </div>`;

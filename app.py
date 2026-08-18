@@ -17,6 +17,7 @@ import hashlib
 from datetime import datetime, date, timedelta
 from functools import wraps
 from urllib.parse import quote
+from mcp_client import MCPHTTPClient
 
 # v17 修复：强制东八区时区（容器默认 UTC 会导致报告周期/生成时间错位 8 小时）
 os.environ['TZ'] = 'Asia/Shanghai'
@@ -203,6 +204,10 @@ def scheduler_loop():
             if _daily_sync_due():
                 _mark_daily_sync_done()
                 _daily_dingtalk_sync()
+            # v27.0：iTop 工单同步（工作时间每小时/非工时每天一次，异步不阻塞主循环）
+            if _itop_sync_due():
+                _mark_itop_sync_done()
+                threading.Thread(target=_sync_itop_tickets_safe, args=('incremental',), daemon=True).start()
             try:
                 conn.execute('START TRANSACTION')
                 templates = conn.execute(
@@ -2732,6 +2737,19 @@ def _report_materials(db, uid, start, end):
             parent_all_done[pid] = True
 
     s0, e1 = start + ' 00:00:00', end + ' 23:59:59'
+    # v27.0：iTop 工单素材（周期内新建/解决/关闭）
+    itop_rows = db.execute('''
+        SELECT ticket_ref, ticket_class, title, status, priority, agent_name,
+               start_date, resolution_date, close_date, time_spent
+        FROM itop_tickets
+        WHERE user_id = ? AND (
+            (start_date != '' AND start_date BETWEEN ? AND ?)
+            OR (resolution_date != '' AND resolution_date BETWEEN ? AND ?)
+            OR (close_date != '' AND close_date BETWEEN ? AND ?)
+        )
+        ORDER BY COALESCE(NULLIF(resolution_date, ''), NULLIF(close_date, ''), start_date) DESC
+        LIMIT 100
+    ''', (uid, s0, e1, s0, e1, s0, e1)).fetchall()
     created_items = [i for i in items if i['created_at'] and s0 <= i['created_at'] <= e1]
     completed_items = [i for i in items if
                        (i['status'] == 'completed' and i['completed_at'] and s0 <= i['completed_at'] <= e1)
@@ -2808,6 +2826,7 @@ def _report_materials(db, uid, start, end):
         'cat_sorted': cat_sorted, 'day_counts': day_counts,
         'kb': kb, 'kb_titles': kb_titles,
         'chat_content': chat_content, 'todo_rows': todo_rows, 'todo_stats': todo_stats,
+        'itop_tickets': [dict(r) for r in itop_rows],
     }
 
 
@@ -2980,6 +2999,23 @@ def _build_report_html(period_label, user, mat, ai):
     cat_bars = _report_cat_bars(mat['cat_sorted'])
     day_chart = _report_day_chart(mat['day_counts'])
     kb_block = _report_kb_block(mat['kb'], mat['kb_titles'])
+    # v27.0：ITSM 工单块
+    _it = mat.get('itop_tickets') or []
+    _it_done = [x for x in _it if x['status'] in ('resolved', 'closed', 'reject')]
+    _it_open = [x for x in _it if x['status'] not in ('resolved', 'closed', 'reject')]
+    _it_list = ''.join(
+        '<li>' + _esc(x['ticket_ref']) + ' &middot; ' + _esc((x['title'] or '')[:50])
+        + '（' + _esc(x['status']) + '）</li>'
+        for x in (_it_done[:8] + _it_open[:8]))
+    itop_block = (
+        '<div class="rp-todo-kpis">'
+        + '<div class="rp-kpi"><b>' + str(len(_it)) + '</b><span>本期涉及工单</span></div>'
+        + '<div class="rp-kpi ok"><b>' + str(len(_it_done)) + '</b><span>已解决/关闭</span></div>'
+        + '<div class="rp-kpi warn"><b>' + str(len(_it_open)) + '</b><span>处理中</span></div>'
+        + '</div>'
+        + ('<ul class="rp-list ok" style="margin-top:8px">' + _it_list + '</ul>' if _it_list
+           else '<div class="rp-empty">本期无工单</div>')
+    )
 
     def li_list(items, cls):
         if not items:
@@ -3006,7 +3042,8 @@ def _build_report_html(period_label, user, mat, ai):
     ai_block = f'''
   <div class="rp-card"><div class="rp-card-t">💼 关键工作内容（AI 从对话/待办/工作项提炼）</div>{li_list(ai.get("key_work", []), "ok")}</div>
   <div class="rp-card"><div class="rp-card-t">🗣️ 对话主题分析</div>{li_list(ai.get("chat_topics", []), "plan")}</div>
-  <div class="rp-card"><div class="rp-card-t">⏱️ 待办处理与时效统计</div>{todo_block}</div>'''
+  <div class="rp-card"><div class="rp-card-t">⏱️ 待办处理与时效统计</div>{todo_block}</div>
+  <div class="rp-card"><div class="rp-card-t">🎫 ITSM 工单（iTop，MCP 同步）</div>{itop_block}</div>'''
 
     html = f'''
 <div class="rp-wrap">
@@ -3049,6 +3086,15 @@ def _report_text(period_label, user, mat, ai):
           f"完成率 {ts.get('done_rate', 0)}%，逾期未完成 {ts.get('overdue', 0)} 条\n"
           f"- 其中：工作台事项 {ts.get('work_items_total', 0)} 项（完成 {ts.get('work_items_done', 0)}），"
           f"钉钉待办去重后 {ts.get('dingtalk_total', 0)} 项（完成 {ts.get('dingtalk_done', 0)}）\n\n")
+    _it = mat.get('itop_tickets') or []
+    _it_done = [x for x in _it if x['status'] in ('resolved', 'closed', 'reject')]
+    _it_open = [x for x in _it if x['status'] not in ('resolved', 'closed', 'reject')]
+    if _it:
+        t += "## ITSM 工单（iTop）\n"
+        t += "- 本期涉及工单 " + str(len(_it)) + " 张：已解决/关闭 " + str(len(_it_done)) + " 张，处理中 " + str(len(_it_open)) + " 张\n"
+        for x in _it[:15]:
+            t += "  - [" + str(x['ticket_ref']) + "] " + str(x['title'] or '')[:60] + "（" + str(x['status']) + "）\n"
+        t += "\n"
     t += f"## 主要成果\n{b(ai.get('highlights', []))}\n"
     t += f"## 待解决问题\n{b(ai.get('issues', []))}\n"
     t += f"## 下期计划\n{b(ai.get('plan', []))}\n"
@@ -3147,6 +3193,16 @@ def generate_report():
     for t in mat['todo_rows'][:20]:
         c = (t.get('content') or '').replace('\n', ' ')
         material += f"- {c[:100]}\n"
+    # v27.0：iTop 工单素材
+    _it = mat.get('itop_tickets') or []
+    material += "\n【iTop 工单（ITSM，MCP 同步）】本期涉及 " + str(len(_it)) + " 张："
+    material += ("已解决/关闭 " + str(sum(1 for x in _it if x['status'] in ('resolved', 'closed', 'reject'))) + " 张，"
+                 "处理中 " + str(sum(1 for x in _it if x['status'] not in ('resolved', 'closed', 'reject'))) + " 张\n")
+    for x in _it[:15]:
+        material += ("- [" + str(x['ticket_ref']) + "] " + str(x['title'] or '')[:60]
+                     + "（" + str(x['status']) + "，工程师 " + str(x.get('agent_name') or '未指派') + "）\n")
+    if not _it:
+        material += "（本期无关联工单）\n"
     # v15：周期内对话（关键工作内容来源）
     material += "\n【本周期对话记录（钉钉聊天，供提取关键工作内容）】\n"
     if mat['chat_content']:
@@ -3372,6 +3428,15 @@ def stats():
         mcp_stats = {r['user_id']: r for r in db.execute(
             "SELECT user_id, COUNT(*) as cnt, MAX(last_used_at) as last_used FROM mcp_tokens WHERE enabled=1 GROUP BY user_id"
         ).fetchall()}
+        # v27.0：iTop 工单统计（按工程师）
+        _itop_month = today[:7]
+        itop_stats = {r['user_id']: r for r in db.execute(
+            """SELECT user_id,
+                SUM(CASE WHEN status NOT IN ('resolved','closed','reject') THEN 1 ELSE 0 END) as itop_active,
+                SUM(CASE WHEN SUBSTRING(close_date,1,7)=? OR SUBSTRING(resolution_date,1,7)=? THEN 1 ELSE 0 END) as itop_month_closed
+            FROM itop_tickets WHERE user_id IS NOT NULL GROUP BY user_id""",
+            (_itop_month, _itop_month)
+        ).fetchall()}
 
         # v25.9：附加钉钉绑定状态
         bound_rows = db.execute('SELECT user_id FROM dingtalk_bindings').fetchall()
@@ -3391,6 +3456,9 @@ def stats():
             _ms = mcp_stats.get(u['id'])
             d['mcp_count'] = int(_ms['cnt']) if _ms else 0
             d['mcp_last_used'] = (_ms.get('last_used') or '') if _ms else ''
+            _is = itop_stats.get(u['id'])
+            d['itop_active'] = int(_is['itop_active'] or 0) if _is else 0
+            d['itop_month_closed'] = int(_is['itop_month_closed'] or 0) if _is else 0
             user_stats_list.append(d)
 
         return jsonify({
@@ -3427,6 +3495,20 @@ def stats():
             "SELECT AVG(actual_duration_minutes) as avg FROM work_items WHERE user_id=? AND status='completed' AND actual_duration_minutes > 0",
             (uid,)
         ).fetchone()['avg'] or 0
+        # v27.0：iTop 工单统计（本人名下）
+        _itop_month_p = today[:7]
+        itop_active = db.execute(
+            "SELECT COUNT(*) as c FROM itop_tickets WHERE user_id=? AND status NOT IN ('resolved','closed','reject')",
+            (uid,)
+        ).fetchone()['c']
+        itop_today_closed = db.execute(
+            "SELECT COUNT(*) as c FROM itop_tickets WHERE user_id=? AND (SUBSTRING(close_date,1,10)=? OR SUBSTRING(resolution_date,1,10)=?)",
+            (uid, today, today)
+        ).fetchone()['c']
+        itop_month_closed = db.execute(
+            "SELECT COUNT(*) as c FROM itop_tickets WHERE user_id=? AND (SUBSTRING(close_date,1,7)=? OR SUBSTRING(resolution_date,1,7)=?)",
+            (uid, _itop_month_p, _itop_month_p)
+        ).fetchone()['c']
         overdue_rate = round((overdue / max(pending + in_progress + overdue, 1)) * 100, 1)
         today_completed = db.execute(
             "SELECT COUNT(*) as c FROM work_items WHERE (user_id=? OR (',' || collaborators || ',') LIKE ?) AND status='completed' AND date(completed_at) = ?",
@@ -3437,7 +3519,7 @@ def stats():
             'in_progress': in_progress, 'overdue': overdue,
             'avg_duration_minutes': round(avg_duration, 1),
             'overdue_rate': overdue_rate,
-            'today_completed': today_completed
+            'today_completed': today_completed, 'itop_active': itop_active, 'itop_today_closed': itop_today_closed, 'itop_month_closed': itop_month_closed
         })
 
 
@@ -5536,10 +5618,543 @@ def list_knowledge():
     return jsonify([dict(r) for r in rows])
 
 
+
+# ====================================================================
+# v27.0：iTop ITSM 集成（MCP over Streamable HTTP）
+# 数据来源: itop-mcp 服务（run_oql / add_ticket_log / apply_stimulus）
+# ====================================================================
+ITOP_MCP_URL = os.environ.get('ITOP_MCP_URL', 'http://YOUR_SERVER_IP:8003/mcp')
+ITOP_CLASSES = ('UserRequest', 'Incident', 'Problem', 'Change')
+ITOP_CLOSED_STATUSES = ('resolved', 'closed', 'reject')
+_ITOP_MARK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+
+_itop_mcp = None
+_itop_mcp_lock = threading.Lock()
+_itop_sync_lock = threading.Lock()
+_ITOP_SYNC_STATE = {
+    'running': False, 'mode': '', 'started_at': '', 'finished_at': '',
+    'last': None, 'error': ''
+}
+
+
+def _get_itop_client():
+    # MCPHTTPClient 单例（懒初始化，线程安全）
+    global _itop_mcp
+    with _itop_mcp_lock:
+        if _itop_mcp is None:
+            _itop_mcp = MCPHTTPClient(ITOP_MCP_URL, timeout=60)
+        return _itop_mcp
+
+
+def _init_itop_tables():
+    # v27.0 建表（幂等）：工单表 + 工程师映射表
+    conn = sqlite3.connect()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS itop_tickets (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT,
+                ticket_class VARCHAR(20) NOT NULL,
+                ticket_ref VARCHAR(32) NOT NULL,
+                ticket_key INT,
+                title VARCHAR(512) NOT NULL DEFAULT '',
+                description MEDIUMTEXT,
+                solution MEDIUMTEXT,
+                status VARCHAR(24) NOT NULL DEFAULT '',
+                priority VARCHAR(8) DEFAULT '',
+                caller_name VARCHAR(128) DEFAULT '',
+                org_name VARCHAR(128) DEFAULT '',
+                team_name VARCHAR(128) DEFAULT '',
+                service_name VARCHAR(191) DEFAULT '',
+                agent_name VARCHAR(128) DEFAULT '',
+                start_date VARCHAR(19) DEFAULT '',
+                resolution_date VARCHAR(19) DEFAULT '',
+                close_date VARCHAR(19) DEFAULT '',
+                last_update VARCHAR(19) DEFAULT '',
+                time_spent INT DEFAULT 0,
+                raw_data MEDIUMTEXT,
+                created_at VARCHAR(19) DEFAULT '',
+                updated_at VARCHAR(19) DEFAULT '',
+                UNIQUE KEY uniq_class_ref (ticket_class, ticket_ref),
+                KEY idx_user (user_id),
+                KEY idx_status (status),
+                KEY idx_last_update (last_update)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS itop_user_map (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                itop_agent_name VARCHAR(128) NOT NULL,
+                user_id INT,
+                updated_at VARCHAR(19) DEFAULT '',
+                UNIQUE KEY uniq_agent (itop_agent_name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _extract_itop_objects(res):
+    # 兼容 itop-mcp 多种返回结构，统一为字段 dict 列表
+    if isinstance(res, list):
+        rows = res
+    elif isinstance(res, dict):
+        rows = None
+        for k in ('objects', 'results', 'items', 'data', 'tickets'):
+            if k in res:
+                rows = res[k]
+                break
+        if rows is None:
+            rows = [res] if ('ref' in res or 'title' in res) else []
+    else:
+        return []
+    out = []
+    if isinstance(rows, dict):
+        for _k, obj in rows.items():
+            if isinstance(obj, dict):
+                row = obj.get('fields') if isinstance(obj.get('fields'), dict) else obj
+                row = dict(row)
+                row.setdefault('key', _k)
+                out.append(row)
+    elif isinstance(rows, list):
+        for obj in rows:
+            if isinstance(obj, dict):
+                row = obj.get('fields') if isinstance(obj.get('fields'), dict) else obj
+                out.append(dict(row))
+    return out
+
+
+def _itop_map_user(conn, agent_name):
+    # agent_name -> user_id：itop_user_map 优先，否则按 display_name 自动匹配
+    if not agent_name:
+        return None
+    row = conn.execute('SELECT user_id FROM itop_user_map WHERE itop_agent_name = ?',
+                       (agent_name,)).fetchone()
+    if row and row.get('user_id'):
+        return int(row['user_id'])
+    u = conn.execute(
+        "SELECT id FROM users WHERE display_name = ? OR display_name LIKE CONCAT('%-', ?)",
+        (agent_name, agent_name)).fetchone()
+    return int(u['id']) if u else None
+
+
+def _upsert_itop_rows(conn, cls, rows):
+    # 批量 upsert（ON DUPLICATE KEY UPDATE）
+    upserted = 0
+    for row in rows:
+        try:
+            ref = str(row.get('ref') or '').strip()
+            if not ref:
+                continue
+            agent_name = str(row.get('agent_name') or '').strip()
+            mapped_uid = _itop_map_user(conn, agent_name)
+            try:
+                key = int(row.get('key') or row.get('id') or 0)
+            except (TypeError, ValueError):
+                key = 0
+
+            def _s(name, lim=512):
+                v = row.get(name)
+                if v is None:
+                    return ''
+                if isinstance(v, (dict, list)):
+                    return json.dumps(v, ensure_ascii=False, default=str)[:lim]
+                return str(v)[:lim]
+
+            def _big(name):
+                v = row.get(name)
+                if v is None:
+                    return None
+                if isinstance(v, (dict, list)):
+                    return json.dumps(v, ensure_ascii=False, default=str)
+                return str(v)
+
+            try:
+                ts = int(row.get('time_spent') or 0)
+            except (TypeError, ValueError):
+                ts = 0
+            now = _now_str()
+            conn.execute("""
+                INSERT INTO itop_tickets
+                (user_id, ticket_class, ticket_ref, ticket_key, title, description, solution,
+                 status, priority, caller_name, org_name, team_name, service_name, agent_name,
+                 start_date, resolution_date, close_date, last_update, time_spent, raw_data,
+                 created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON DUPLICATE KEY UPDATE
+                 user_id=VALUES(user_id), ticket_key=VALUES(ticket_key), title=VALUES(title),
+                 description=VALUES(description), solution=VALUES(solution), status=VALUES(status),
+                 priority=VALUES(priority), caller_name=VALUES(caller_name), org_name=VALUES(org_name),
+                 team_name=VALUES(team_name), service_name=VALUES(service_name), agent_name=VALUES(agent_name),
+                 start_date=VALUES(start_date), resolution_date=VALUES(resolution_date),
+                 close_date=VALUES(close_date), last_update=VALUES(last_update),
+                 time_spent=VALUES(time_spent), raw_data=VALUES(raw_data), updated_at=VALUES(updated_at)
+            """, (
+                mapped_uid, cls, ref, key, _s('title'), _big('description'), _big('solution'),
+                _s('status', 24), _s('priority', 8), _s('caller_name', 128), _s('org_name', 128),
+                _s('team_name', 128), _s('service_name', 191), agent_name[:128],
+                _s('start_date', 19), _s('resolution_date', 19), _s('close_date', 19),
+                _s('last_update', 19), ts,
+                json.dumps(row, ensure_ascii=False, default=str),
+                now, now
+            ))
+            upserted += 1
+        except Exception as e:
+            print('[itop-sync] upsert %s fail: %s' % (cls, e))
+    return upserted
+
+
+def _sync_itop_tickets(mode='incremental'):
+    # 同步 iTop 四类工单：incremental=近2天 / full=近90天（分页拉取）
+    if not _itop_sync_lock.acquire(blocking=False):
+        return {'skipped': 'sync already running'}
+    _ITOP_SYNC_STATE.update({'running': True, 'mode': mode, 'started_at': _now_str(), 'error': ''})
+    try:
+        days = 2 if mode == 'incremental' else 90
+        since = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+        client = _get_itop_client()
+        result = {'mode': mode, 'since': since, 'classes': {}, 'fetched': 0, 'upserted': 0}
+        conn = sqlite3.connect()
+        try:
+            for cls in ITOP_CLASSES:
+                page, cls_fetched, cls_upserted = 1, 0, 0
+                while page <= 60:
+                    oql = "SELECT %s WHERE last_update >= '%s'" % (cls, since)
+                    res = client.call_json('run_oql', {
+                        'oql': oql, 'output_fields': '*', 'limit': 100, 'page': page})
+                    items = _extract_itop_objects(res)
+                    if not items:
+                        break
+                    cls_fetched += len(items)
+                    cls_upserted += _upsert_itop_rows(conn, cls, items)
+                    if len(items) < 100:
+                        break
+                    page += 1
+                result['classes'][cls] = {'fetched': cls_fetched, 'upserted': cls_upserted}
+                result['fetched'] += cls_fetched
+                result['upserted'] += cls_upserted
+            conn.commit()
+            result['unmapped'] = [r['agent_name'] for r in conn.execute(
+                "SELECT DISTINCT agent_name FROM itop_tickets "
+                "WHERE user_id IS NULL AND agent_name != ''").fetchall()]
+            result['total'] = conn.execute('SELECT COUNT(*) as c FROM itop_tickets').fetchone()['c']
+        finally:
+            conn.close()
+        result['finished_at'] = _now_str()
+        _ITOP_SYNC_STATE.update({'running': False, 'finished_at': result['finished_at'], 'last': result})
+        print('[itop-sync] done: ' + json.dumps(result, ensure_ascii=False)[:500])
+        return result
+    except Exception as e:
+        _ITOP_SYNC_STATE.update({'running': False, 'error': str(e)})
+        print('[itop-sync] error: %s' % e)
+        return {'error': str(e)}
+    finally:
+        _itop_sync_lock.release()
+
+
+def _sync_itop_tickets_safe(mode):
+    try:
+        _sync_itop_tickets(mode)
+    except Exception as e:
+        print('[itop-sync] safe wrapper: %s' % e)
+
+
+def _itop_sync_key():
+    # 工作时间（周一~周五 08-18 点）每小时一次，其余每天一次
+    now = datetime.now()
+    if now.weekday() < 5 and 8 <= now.hour <= 18:
+        return now.strftime('%Y%m%d_%H')
+    return now.strftime('%Y%m%d')
+
+
+def _itop_sync_due():
+    try:
+        os.makedirs(_ITOP_MARK_DIR, exist_ok=True)
+        return not os.path.exists(os.path.join(_ITOP_MARK_DIR, 'itop_sync_%s.done' % _itop_sync_key()))
+    except Exception:
+        return False
+
+
+def _mark_itop_sync_done():
+    try:
+        os.makedirs(_ITOP_MARK_DIR, exist_ok=True)
+        open(os.path.join(_ITOP_MARK_DIR, 'itop_sync_%s.done' % _itop_sync_key()), 'w').write(_now_str())
+        cutoff = time.time() - 3 * 86400
+        for fn in os.listdir(_ITOP_MARK_DIR):
+            if fn.startswith('itop_sync_') and fn.endswith('.done'):
+                p = os.path.join(_ITOP_MARK_DIR, fn)
+                try:
+                    if os.path.getmtime(p) < cutoff:
+                        os.remove(p)
+                except OSError:
+                    pass
+    except Exception as e:
+        print('[itop-sync] mark fail: %s' % e)
+
+
+def _refresh_itop_ticket(cls, ref):
+    # 写回后从 iTop 拉取单张工单并 upsert（同步最新状态）
+    client = _get_itop_client()
+    oql = "SELECT %s WHERE ref = '%s'" % (cls, ref)
+    res = client.call_json('run_oql', {'oql': oql, 'output_fields': '*', 'limit': 5, 'page': 1})
+    items = _extract_itop_objects(res)
+    if not items:
+        return None
+    conn = sqlite3.connect()
+    try:
+        n = _upsert_itop_rows(conn, cls, items)
+        conn.commit()
+    finally:
+        conn.close()
+    return items[0] if n else None
+
+
+@app.route('/api/itop/status')
+@login_required
+def itop_status():
+    conn = get_db()
+    by_class = {}
+    for r in conn.execute(
+            'SELECT ticket_class, status, COUNT(*) as c FROM itop_tickets GROUP BY ticket_class, status').fetchall():
+        by_class.setdefault(r['ticket_class'], {'total': 0, 'active': 0, 'closed': 0})
+        by_class[r['ticket_class']]['total'] += r['c']
+        if r['status'] in ITOP_CLOSED_STATUSES:
+            by_class[r['ticket_class']]['closed'] += r['c']
+        else:
+            by_class[r['ticket_class']]['active'] += r['c']
+    unmapped = [r['agent_name'] for r in conn.execute(
+        "SELECT DISTINCT agent_name FROM itop_tickets "
+        "WHERE user_id IS NULL AND agent_name != '' ORDER BY agent_name").fetchall()]
+    total = conn.execute('SELECT COUNT(*) as c FROM itop_tickets').fetchone()['c']
+    last_data = conn.execute('SELECT MAX(updated_at) as t FROM itop_tickets').fetchone()['t'] or ''
+    return jsonify({
+        'enabled': True, 'mcp_url': ITOP_MCP_URL,
+        'total': total, 'by_class': by_class,
+        'unmapped_agents': unmapped, 'last_data_at': last_data,
+        'sync_state': _ITOP_SYNC_STATE
+    })
+
+
+@app.route('/api/itop/tickets')
+@login_required
+def itop_tickets_list():
+    # 本人工单列表（管理员可 user_id= / scope=team 查全部）
+    conn = get_db()
+    where, params = [], []
+    if session.get('is_admin') and request.args.get('scope') == 'team':
+        pass
+    elif session.get('is_admin') and request.args.get('user_id'):
+        where.append('user_id = ?')
+        params.append(int(request.args.get('user_id')))
+    else:
+        where.append('user_id = ?')
+        params.append(session['user_id'])
+    cls = request.args.get('ticket_class', '')
+    if cls in ITOP_CLASSES:
+        where.append('ticket_class = ?')
+        params.append(cls)
+    st = request.args.get('status', '')
+    if st == 'active':
+        where.append("status NOT IN ('resolved','closed','reject')")
+    elif st == 'closed':
+        where.append("status IN ('resolved','closed','reject')")
+    elif st:
+        where.append('status = ?')
+        params.append(st)
+    q = (request.args.get('q') or '').strip()
+    if q:
+        where.append('(title LIKE ? OR ticket_ref LIKE ?)')
+        params.extend(['%' + q + '%', '%' + q + '%'])
+    wsql = (' WHERE ' + ' AND '.join(where)) if where else ''
+    total = conn.execute('SELECT COUNT(*) as c FROM itop_tickets' + wsql, params).fetchone()['c']
+    try:
+        limit = min(int(request.args.get('limit', 50) or 50), 200)
+    except ValueError:
+        limit = 50
+    try:
+        offset = max(int(request.args.get('offset', 0) or 0), 0)
+    except ValueError:
+        offset = 0
+    rows = conn.execute(
+        'SELECT * FROM itop_tickets' + wsql + ' ORDER BY last_update DESC LIMIT %d OFFSET %d' % (limit, offset),
+        params).fetchall()
+    return jsonify({'total': total, 'items': [dict(r) for r in rows]})
+
+
+@app.route('/api/itop/tickets/<cls>/<ref>')
+@login_required
+def itop_ticket_detail(cls, ref):
+    if cls not in ITOP_CLASSES:
+        return jsonify({'error': '无效的工单类型'}), 400
+    conn = get_db()
+    row = conn.execute('SELECT * FROM itop_tickets WHERE ticket_class = ? AND ticket_ref = ?',
+                       (cls, ref)).fetchone()
+    if not row:
+        return jsonify({'error': '工单不存在'}), 404
+    row = dict(row)
+    if not session.get('is_admin') and row.get('user_id') != session['user_id']:
+        return jsonify({'error': '无权访问'}), 403
+    try:
+        row['raw'] = json.loads(row.get('raw_data') or '{}')
+    except Exception:
+        row['raw'] = {}
+    return jsonify(row)
+
+
+@app.route('/api/itop/tickets/<cls>/<ref>/log', methods=['POST'])
+@login_required
+def itop_ticket_add_log(cls, ref):
+    # 工单加日志（MCP add_ticket_log 写回 iTop）
+    if cls not in ITOP_CLASSES:
+        return jsonify({'error': '无效的工单类型'}), 400
+    if not re.match(r'^[A-Za-z0-9\-_]+$', ref):
+        return jsonify({'error': '无效的工单号'}), 400
+    data = request.get_json(silent=True) or {}
+    message = (data.get('message') or '').strip()
+    if not message:
+        return jsonify({'error': '日志内容不能为空'}), 400
+    conn = get_db()
+    row = conn.execute('SELECT * FROM itop_tickets WHERE ticket_class = ? AND ticket_ref = ?',
+                       (cls, ref)).fetchone()
+    if not row:
+        return jsonify({'error': '工单不存在，请先同步'}), 404
+    if not session.get('is_admin') and row['user_id'] != session['user_id']:
+        return jsonify({'error': '只能操作本人名下工单'}), 403
+    try:
+        key = int(row['ticket_key'] or 0)
+        if not key:
+            return jsonify({'error': '工单缺少 iTop key，无法写回'}), 400
+        who_row = conn.execute('SELECT display_name FROM users WHERE id = ?',
+                               (session['user_id'],)).fetchone()
+        who = (who_row or {}).get('display_name') or ''
+        client = _get_itop_client()
+        res = client.call_json('add_ticket_log', {
+            'ticket_class': cls, 'key': key,
+            'message': ('[' + who + '] ' if who else '') + message,
+            'log_field': 'private_log' if data.get('private') else 'public_log',
+            'comment': 'infra-workbench v27'
+        })
+        _refresh_itop_ticket(cls, ref)
+        return jsonify({'ok': True, 'result': res})
+    except Exception as e:
+        return jsonify({'error': 'iTop 写回失败：%s' % e}), 502
+
+
+@app.route('/api/itop/tickets/<cls>/<ref>/stimulus', methods=['POST'])
+@login_required
+def itop_ticket_apply_stimulus(cls, ref):
+    # 工单流转（MCP apply_stimulus 写回 iTop）
+    if cls not in ITOP_CLASSES:
+        return jsonify({'error': '无效的工单类型'}), 400
+    if not re.match(r'^[A-Za-z0-9\-_]+$', ref):
+        return jsonify({'error': '无效的工单号'}), 400
+    data = request.get_json(silent=True) or {}
+    stimulus = (data.get('stimulus') or '').strip()
+    if not re.match(r'^ev_[a-z0-9_]+$', stimulus):
+        return jsonify({'error': '无效的流转动作（须为 ev_xxx）'}), 400
+    conn = get_db()
+    row = conn.execute('SELECT * FROM itop_tickets WHERE ticket_class = ? AND ticket_ref = ?',
+                       (cls, ref)).fetchone()
+    if not row:
+        return jsonify({'error': '工单不存在，请先同步'}), 404
+    if not session.get('is_admin') and row['user_id'] != session['user_id']:
+        return jsonify({'error': '只能操作本人名下工单'}), 403
+    try:
+        key = int(row['ticket_key'] or 0)
+        if not key:
+            return jsonify({'error': '工单缺少 iTop key，无法写回'}), 400
+        args = {'iop_class': cls, 'key': key, 'stimulus': stimulus,
+                'comment': (data.get('comment') or 'infra-workbench v27')}
+        fields = data.get('fields')
+        if isinstance(fields, dict) and fields:
+            args['fields'] = fields
+        client = _get_itop_client()
+        res = client.call_json('apply_stimulus', args)
+        _refresh_itop_ticket(cls, ref)
+        return jsonify({'ok': True, 'result': res})
+    except Exception as e:
+        return jsonify({'error': 'iTop 流转失败：%s' % e}), 502
+
+
+@app.route('/api/itop/sync', methods=['POST'])
+@login_required
+def itop_sync_now():
+    if not session.get('is_admin'):
+        return jsonify({'error': '需要管理员权限'}), 403
+    if _ITOP_SYNC_STATE.get('running'):
+        return jsonify({'status': 'already_running', 'state': _ITOP_SYNC_STATE})
+    data = request.get_json(silent=True) or {}
+    mode = data.get('mode') or 'incremental'
+    if mode not in ('incremental', 'full'):
+        mode = 'incremental'
+    threading.Thread(target=_sync_itop_tickets, args=(mode,), daemon=True).start()
+    return jsonify({'status': 'started', 'mode': mode})
+
+
+@app.route('/api/itop/user-map', methods=['GET'])
+@login_required
+def itop_user_map_list():
+    if not session.get('is_admin'):
+        return jsonify({'error': '需要管理员权限'}), 403
+    conn = get_db()
+    maps = conn.execute("""
+        SELECT m.itop_agent_name, m.user_id, m.updated_at, u.display_name
+        FROM itop_user_map m LEFT JOIN users u ON m.user_id = u.id
+        ORDER BY m.itop_agent_name
+    """).fetchall()
+    agents = conn.execute("""
+        SELECT agent_name, COUNT(*) as c FROM itop_tickets
+        WHERE agent_name != '' GROUP BY agent_name ORDER BY c DESC
+    """).fetchall()
+    return jsonify({'mappings': [dict(r) for r in maps], 'agents': [dict(r) for r in agents]})
+
+
+@app.route('/api/itop/user-map', methods=['POST'])
+@login_required
+def itop_user_map_set():
+    if not session.get('is_admin'):
+        return jsonify({'error': '需要管理员权限'}), 403
+    data = request.get_json(silent=True) or {}
+    name = (data.get('itop_agent_name') or '').strip()
+    uid = data.get('user_id')
+    if not name:
+        return jsonify({'error': '缺少 itop_agent_name'}), 400
+    conn = get_db()
+    if uid in (None, '', 0):
+        conn.execute('DELETE FROM itop_user_map WHERE itop_agent_name = ?', (name,))
+    else:
+        conn.execute('REPLACE INTO itop_user_map (itop_agent_name, user_id, updated_at) VALUES (?,?,?)',
+                     (name, int(uid), _now_str()))
+    new_uid = _itop_map_user(conn, name)
+    conn.execute('UPDATE itop_tickets SET user_id = ? WHERE agent_name = ?', (new_uid, name))
+    conn.commit()
+    n = 0
+    if new_uid:
+        n = conn.execute('SELECT COUNT(*) as c FROM itop_tickets WHERE agent_name = ? AND user_id = ?',
+                         (name, new_uid)).fetchone()['c']
+    return jsonify({'ok': True, 'user_id': new_uid, 'remapped': n})
+
+
+@app.route('/api/team/member/<int:uid>/itop')
+@login_required
+def team_member_itop(uid):
+    if not session.get('is_admin'):
+        return jsonify({'error': '需要管理员权限'}), 403
+    conn = get_db()
+    rows = conn.execute(
+        'SELECT ticket_ref, ticket_class, title, status, priority, agent_name, start_date, '
+        'resolution_date, close_date, last_update, time_spent '
+        'FROM itop_tickets WHERE user_id = ? ORDER BY last_update DESC LIMIT 100',
+        (uid,)).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
 # ====================================================================
 # 初始化
 # ====================================================================
 init_db()
+_init_itop_tables()
 _start_scheduler()
 
 if __name__ == '__main__':
