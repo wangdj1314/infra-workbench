@@ -1,8 +1,21 @@
 # 基础架构工作台 (Infrastructure Workbench)
 
-基础架构团队的统一工作平台，集成钉钉数据同步、AI 工作建议、任务管理、团队概览、MCP Server 接入等功能。
+基础架构团队的统一工作平台，集成钉钉数据同步、AI 工作建议、任务管理、团队概览、iTop ITSM 工单、多团队权限体系、模型供应商管理、MCP Server 接入等功能。
+
+> **当前版本：v28.8（内测基线，2026-08-18）** — 面向基础架构 + 信息安全两个团队内测。
 
 ## 功能特性
+
+### 团队体系与权限（v28.x）
+- **多团队管理**：团队增删改、成员归属、板块（责任区域）按团队隔离；团队概览/成员管理按团队分栏展示
+- **主管理员（is_super）**：全局视野，不可降级（前后端双守卫）
+- **团队子管理员**：报告、iTop 工单、团队概览统计、AI 用量、工作内容全部按团队作用域隔离（`get_admin_scope()`），越权访问返回 403
+- **AD 字段同步**：一键从域控回填工号（employeeID）/岗位（title）/邮箱（mail），仅填空缺不覆盖已有内容；团队概览卡片展示「岗位 · 工号」并可发起 AI 岗位分析
+
+### 模型供应商管理（v28.2+）
+- OpenAI 兼容接口接入，用户在 API 设置页自选模型；管理员可添加自定义供应商
+- 预置 Qwen3.6（系统默认）与 Qwen3.8-27B
+- **思考型模型兼容（v28.8）**：思考链耗尽 token 返回空 content 时，自动以「关闭思考 + 3 倍 token」重试，后端不支持参数时自动退化为纯加大 token
 
 ### 钉钉数据同步
 - **聊天消息**：自动同步钉钉群聊/单聊消息，支持增量同步（2天窗口）与全量同步（30天）
@@ -57,7 +70,7 @@
 |------|------|
 | 后端 | Flask 3.0.3 + Gunicorn (gthread 2w×8t) |
 | 数据库 | MySQL 8.0（通过 _db_shim.py 兼容层，原 SQLite 代码无需修改） |
-| 前端 | 单文件 SPA (vanilla JS, ~4500 行) |
+| 前端 | 单文件 SPA (vanilla JS, ~5400 行) |
 | 部署 | Docker Compose |
 | 认证 | LDAP/AD |
 | 钉钉同步 | DWS CLI（per-user token isolation） |
@@ -116,11 +129,11 @@ ITOP_MCP_URL = os.environ.get('ITOP_MCP_URL', 'http://YOUR_SERVER_IP:8003/mcp')
 
 ```
 infra-workbench/
-├── app.py              # Flask 主应用 (~5800 行)
+├── app.py              # Flask 主应用 (~6900 行)
 ├── _db_shim.py         # MySQL 兼容层（datetime/date→str, close()幂等）
 ├── mcp_client.py       # MCP HTTP 客户端（Streamable HTTP，v27.0）
 ├── static/
-│   └── index.html      # 单文件 SPA 前端 (~5100 行)
+│   └── index.html      # 单文件 SPA 前端 (~5400 行)
 ├── data/               # 数据目录（MySQL 数据在 workbench-mysql 容器）
 │   ├── dws_bin/        # DWS CLI 二进制
 │   ├── dws_tokens/     # per-user DWS token 目录
@@ -154,8 +167,15 @@ v26.x 从 SQLite 迁移至 MySQL 8.0。通过 `_db_shim.py` 兼容层，原有 S
 
 详见 [CHANGELOG.md](CHANGELOG.md)
 
-### v27.0 (当前版本)
-- **iTop ITSM 工单集成**：MCP 调用能力（mcp_client.py）+ 四类工单定时同步 + 工作台处理工单（日志/流转写回）+ 工程师映射 + 统计与报告整合
+### v28.x (当前版本 · 内测基线 v28.8)
+- **团队体系与权限**：多团队 + 主/子管理员两级权限，报告/工单/统计/AI 用量按团队作用域隔离（v28.1–28.5）
+- **模型供应商管理**：OpenAI 兼容多模型接入、用户自选、思考型模型自动重试兼容（v28.2 / v28.7–28.8）
+- **AD 字段同步**：域控工号/岗位/邮箱一键回填，团队概览展示岗位与工号 + AI 岗位分析（v28.6）
+- **工作内容管理团队筛选**、信息安全团队板块预置（v28.4）
+
+### v27.x
+- **iTop ITSM 工单集成（v27.0）**：MCP 调用能力（mcp_client.py）+ 四类工单定时同步 + 工作台处理工单（日志/流转写回）+ 工程师映射 + 统计与报告整合
+- ITSM 统计口径（只算映射到工作台用户的工单）、映射管理搜索化（v27.1）
 
 ### v26.6 - v26.7
 - **修复 DWS 同步 0 条**：MySQL 迁移后 `ON CONFLICT` 语法导致写入失败（1064），改为 `ON DUPLICATE KEY UPDATE` + 补唯一索引
@@ -178,4 +198,4 @@ v26.x 从 SQLite 迁移至 MySQL 8.0。通过 `_db_shim.py` 兼容层，原有 S
 
 ## 许可证
 
-内部项目，仅供基础架构团队使用。
+内部项目，仅供基础架构与信息安全团队使用。
