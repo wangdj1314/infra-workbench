@@ -611,7 +611,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="login-card">
     <div class="login-logo">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <h1>基础架构工作台 <span class="version-badge">v28.4</span></h1>
+      <h1>基础架构工作台 <span class="version-badge">v28.5</span></h1>
       <p>Infrastructure Team Workbench</p>
     </div>
     <div id="loginError" class="login-error hidden"></div>
@@ -636,7 +636,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="topbar">
     <div class="topbar-left">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" style="width:22px;height:22px"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v28.4">v28.4</span>
+      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v28.5">v28.5</span>
     </div>
     <div class="topbar-right">
       <div class="ai-token-badge" onclick="switchTab('apikey')" title="AI Token 消耗">
@@ -1300,11 +1300,13 @@ async function loadItopStatus() {
 
 async function loadItopTickets() {
   loadItopStatus();
-  if (currentUser && currentUser.is_admin) {
+  // v28.5：映射管理与同步控制仅主管理员可用；子管理员的团队范围由后端作用域控制
+  if (currentUser && currentUser.is_super) {
     document.getElementById('itopAdminBox').style.display = '';
   } else {
+    document.getElementById('itopAdminBox').style.display = 'none';
     const sl = document.getElementById('itopScopeLabel');
-    if (sl) sl.style.display = 'none';
+    if (sl && !(currentUser && currentUser.is_admin)) sl.style.display = 'none';
   }
   const params = new URLSearchParams({status: itopFilter.status, ticket_class: itopFilter.ticket_class, q: itopFilter.q, limit: 100});
   if (currentUser && currentUser.is_admin) {
@@ -1336,7 +1338,7 @@ async function loadItopTickets() {
   } catch(err) {
     document.getElementById('itopTickets').innerHTML = `<div class="empty"><p>加载失败：${escapeHtml(err.message)}</p></div>`;
   }
-  if (currentUser && currentUser.is_admin) loadItopUserMap();
+  if (currentUser && currentUser.is_super) loadItopUserMap();
 }
 
 async function showItopTicketModal(cls, ref) {
@@ -4838,10 +4840,12 @@ async function loadReports() {
     if (typeFilter) url += `type=${typeFilter}&`;
     if (currentUser && currentUser.is_admin && userFilterEl.value) url += `user_id=${userFilterEl.value}&`;
     reportsCache = await api(url);
-    // 填充用户筛选（管理员）
+    // 填充用户筛选（管理员；v28.5 子管理员仅本团队成员）
     if (currentUser && currentUser.is_admin) {
+      const isSubAdmin = currentUser.team_id && !currentUser.is_super;
+      const opts = isSubAdmin ? membersCache.filter(u => u.team_id === currentUser.team_id) : membersCache;
       const cur = userFilterEl.value;
-      userFilterEl.innerHTML = '<option value="">全部成员</option>' + membersCache.map(u =>
+      userFilterEl.innerHTML = '<option value="">全部成员</option>' + opts.map(u =>
         `<option value="${u.id}">${escapeHtml(u.display_name)}</option>`
       ).join('');
       userFilterEl.value = cur;

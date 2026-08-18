@@ -621,20 +621,22 @@ def ai_usage_stats():
     month_start = today[:7] + '-01'
 
     if session.get('is_admin') and request.args.get('team'):
-        where = ''
-        params = []
+        # v28.5 子管理员：团队统计限定本团队成员
+        scope_team_id = get_admin_scope()
+        if scope_team_id is not None:
+            where = 'WHERE user_id IN (SELECT id FROM users WHERE team_id = ?)'
+            params = [scope_team_id]
+        else:
+            where = ''
+            params = []
     else:
         where = 'WHERE user_id = ?'
         params = [session['user_id']]
 
-    total = db.execute(f'SELECT * FROM (SELECT SUM(total_tokens) as t FROM ai_usage {where}) AS sub', params).fetchone()
+    total = db.execute(f'SELECT SUM(total_tokens) as t FROM ai_usage {where}', params).fetchone()
     today_usage = db.execute(
-        f"SELECT SUM(total_tokens) as t FROM ai_usage {'WHERE' if where else 'WHERE'} created_at >= ?"
-        + (' AND user_id = ?' if not where else ''),
-        ([today, session['user_id']] if not where else [today])
-    ).fetchone() if not where else db.execute(
-        f"SELECT SUM(total_tokens) as t FROM ai_usage WHERE created_at >= ?", (today,)
-    ).fetchone()
+        f"SELECT SUM(total_tokens) as t FROM ai_usage {where + ' AND' if where else 'WHERE'} created_at >= ?",
+        params + [today]).fetchone()
 
     by_feature = db.execute(f"""
         SELECT feature, SUM(total_tokens) as tokens, COUNT(*) as calls
@@ -644,11 +646,13 @@ def ai_usage_stats():
 
     by_user = []
     if session.get('is_admin') and request.args.get('team'):
-        by_user = db.execute("""
+        _ujoin_where = ('WHERE u.team_id = ?' if scope_team_id is not None else '')
+        by_user = db.execute(f"""
             SELECT u.display_name, u.ad_username, SUM(a.total_tokens) as tokens, COUNT(*) as calls
             FROM ai_usage a JOIN users u ON a.user_id = u.id
+            {_ujoin_where}
             GROUP BY u.id ORDER BY tokens DESC
-        """).fetchall()
+        """, ([scope_team_id] if scope_team_id is not None else [])).fetchall()
 
     return jsonify({
         'total_tokens': total['t'] or 0,
@@ -1110,10 +1114,11 @@ def team_members_simple():
     """所有登录用户均可查看团队成员简表（用于转办/协同选择）"""
     db = get_db()
     rows = db.execute(
-        'SELECT id, display_name, ad_username, section_name, responsibilities FROM users ORDER BY display_name'
+        'SELECT id, display_name, ad_username, section_name, team_id, responsibilities FROM users ORDER BY display_name'
     ).fetchall()
     return jsonify([{'id': r['id'], 'display_name': r['display_name'], 'ad_username': r['ad_username'],
-                     'section_name': r['section_name'] or '', 'responsibilities': dict(r).get('responsibilities') or ''} for r in rows])
+                     'section_name': r['section_name'] or '', 'team_id': r['team_id'],
+                     'responsibilities': dict(r).get('responsibilities') or ''} for r in rows])
 
 
 # ====================================================================
@@ -3574,6 +3579,17 @@ def _report_text(period_label, user, mat, ai):
     return t
 
 
+def _report_scope_denied(db, report):
+    """v28.5 子管理员只能操作本团队成员的报告；主管理员放行"""
+    if not session.get('is_admin'):
+        return report['user_id'] != session['user_id']
+    scope_team_id = get_admin_scope()
+    if scope_team_id is None:
+        return False
+    owner = db.execute('SELECT team_id FROM users WHERE id = ?', (report['user_id'],)).fetchone()
+    return (not owner) or owner['team_id'] != scope_team_id
+
+
 @app.route('/api/reports')
 @login_required
 def list_reports():
@@ -3588,10 +3604,23 @@ def list_reports():
     """
     params = []
 
-    if session.get('is_admin') and user_filter:
-        query += ' AND r.user_id = ?'
-        params.append(user_filter)
-    elif not session.get('is_admin'):
+    if session.get('is_admin'):
+        scope_team_id = get_admin_scope()
+        if scope_team_id is not None:
+            # v28.5 子管理员：只看本团队报告
+            query += ' AND r.user_id IN (SELECT id FROM users WHERE team_id = ?)'
+            params.append(scope_team_id)
+            if user_filter:
+                in_team = db.execute('SELECT id FROM users WHERE id = ? AND team_id = ?',
+                                     (user_filter, scope_team_id)).fetchone()
+                if not in_team:
+                    return jsonify({'error': '无权查看该成员的报告'}), 403
+                query += ' AND r.user_id = ?'
+                params.append(user_filter)
+        elif user_filter:
+            query += ' AND r.user_id = ?'
+            params.append(user_filter)
+    else:
         query += ' AND r.user_id = ?'
         params.append(session['user_id'])
 
@@ -3623,6 +3652,11 @@ def generate_report():
     user = db.execute('SELECT * FROM users WHERE id = ?', (target_user_id,)).fetchone()
     if not user:
         return jsonify({'error': '用户不存在'}), 404
+    # v28.5 子管理员作用域：只能为本团队成员生成报告
+    if session.get('is_admin'):
+        scope_team_id = get_admin_scope()
+        if scope_team_id is not None and user['team_id'] != scope_team_id:
+            return jsonify({'error': '无权为该成员生成报告'}), 403
 
     today = date.today()
     if report_type == 'daily':
@@ -3747,7 +3781,7 @@ def get_report(report_id):
     ).fetchone()
     if not report:
         return jsonify({'error': '报告不存在'}), 404
-    if not session.get('is_admin') and report['user_id'] != session['user_id']:
+    if _report_scope_denied(db, report):
         return jsonify({'error': '无权查看'}), 403
     return jsonify(dict(report))
 
@@ -3759,7 +3793,7 @@ def delete_report(report_id):
     report = db.execute('SELECT * FROM reports WHERE id = ?', (report_id,)).fetchone()
     if not report:
         return jsonify({'error': '报告不存在'}), 404
-    if not session.get('is_admin') and report['user_id'] != session['user_id']:
+    if _report_scope_denied(db, report):
         return jsonify({'error': '无权删除'}), 403
     db.execute('DELETE FROM reports WHERE id = ?', (report_id,))
     db.commit()
@@ -3773,7 +3807,7 @@ def update_report(report_id):
     report = db.execute('SELECT * FROM reports WHERE id = ?', (report_id,)).fetchone()
     if not report:
         return jsonify({'error': '报告不存在'}), 404
-    if not session.get('is_admin') and report['user_id'] != session['user_id']:
+    if _report_scope_denied(db, report):
         return jsonify({'error': '无权编辑'}), 403
 
     data = request.get_json(silent=True) or {}
@@ -3835,15 +3869,22 @@ def stats():
     today = date.today().isoformat()
 
     if session.get('is_admin') and request.args.get('team'):
-        total = db.execute('SELECT COUNT(*) as c FROM work_items').fetchone()['c']
-        completed = db.execute("SELECT COUNT(*) as c FROM work_items WHERE status='completed'").fetchone()['c']
-        pending = db.execute("SELECT COUNT(*) as c FROM work_items WHERE status='pending'").fetchone()['c']
-        in_progress = db.execute("SELECT COUNT(*) as c FROM work_items WHERE status='in_progress'").fetchone()['c']
+        # v28.5：子管理员只统计本团队；主管理员/全局管理员看全部
+        scope_team_id = get_admin_scope()
+        _wteam = ('WHERE w.user_id IN (SELECT id FROM users WHERE team_id = %d)' % scope_team_id) if scope_team_id else ''
+        total = db.execute(f'SELECT COUNT(*) as c FROM work_items w {_wteam}').fetchone()['c']
+        completed = db.execute(
+            f"SELECT COUNT(*) as c FROM work_items w {_wteam}{' AND' if _wteam else ' WHERE'} w.status='completed'").fetchone()['c']
+        pending = db.execute(
+            f"SELECT COUNT(*) as c FROM work_items w {_wteam}{' AND' if _wteam else ' WHERE'} w.status='pending'").fetchone()['c']
+        in_progress = db.execute(
+            f"SELECT COUNT(*) as c FROM work_items w {_wteam}{' AND' if _wteam else ' WHERE'} w.status='in_progress'").fetchone()['c']
         overdue = db.execute(
-            "SELECT COUNT(*) as c FROM work_items WHERE status!='completed' AND due_date!='' AND due_date < ?", (today,)
-        ).fetchone()['c']
+            f"SELECT COUNT(*) as c FROM work_items w {_wteam}{' AND' if _wteam else ' WHERE'} w.status!='completed' AND w.due_date!='' AND w.due_date < ?",
+            (today,)).fetchone()['c']
 
-        user_stats = db.execute("""
+        _uteam = ('WHERE u.team_id = %d' % scope_team_id) if scope_team_id else ''
+        user_stats = db.execute(f"""
             SELECT u.id, u.display_name, u.section_name, u.ad_username,
                 COUNT(w.id) as total,
                 SUM(CASE WHEN w.status='completed' THEN 1 ELSE 0 END) as completed,
@@ -3853,6 +3894,7 @@ def stats():
             FROM users u
             LEFT JOIN work_items w ON w.user_id = u.id
                 OR (',' || w.collaborators || ',') LIKE '%,' || u.id || ',%'
+            {_uteam}
             GROUP BY u.id ORDER BY u.id
         """, (today,)).fetchall()
 
@@ -6384,10 +6426,16 @@ def _refresh_itop_ticket(cls, ref):
 @login_required
 def itop_status():
     conn = get_db()
+    # v28.5 子管理员作用域：统计口径限定本团队映射用户
+    scope_team_id = get_admin_scope() if session.get('is_admin') else None
+    if scope_team_id is not None:
+        scope_cond = 'user_id IN (SELECT id FROM users WHERE team_id = %d)' % scope_team_id
+    else:
+        scope_cond = 'user_id IS NOT NULL'
     by_class = {}
     for r in conn.execute(
             'SELECT ticket_class, status, COUNT(*) as c FROM itop_tickets '
-            'WHERE user_id IS NOT NULL GROUP BY ticket_class, status').fetchall():
+            'WHERE ' + scope_cond + ' GROUP BY ticket_class, status').fetchall():
         by_class.setdefault(r['ticket_class'], {'total': 0, 'active': 0, 'closed': 0})
         by_class[r['ticket_class']]['total'] += r['c']
         if r['status'] in ITOP_CLOSED_STATUSES:
@@ -6396,16 +6444,30 @@ def itop_status():
             by_class[r['ticket_class']]['active'] += r['c']
     # v27.1：口径限定本团队（映射到工作台用户的工单）；mapped_users = 已映射工程师数
     mapped_users = conn.execute(
-        'SELECT COUNT(DISTINCT user_id) as c FROM itop_tickets WHERE user_id IS NOT NULL').fetchone()['c']
+        'SELECT COUNT(DISTINCT user_id) as c FROM itop_tickets WHERE ' + scope_cond).fetchone()['c']
     total = conn.execute(
-        'SELECT COUNT(*) as c FROM itop_tickets WHERE user_id IS NOT NULL').fetchone()['c']
-    last_data = conn.execute('SELECT MAX(updated_at) as t FROM itop_tickets WHERE user_id IS NOT NULL').fetchone()['t'] or ''
+        'SELECT COUNT(*) as c FROM itop_tickets WHERE ' + scope_cond).fetchone()['c']
+    last_data = conn.execute(
+        'SELECT MAX(updated_at) as t FROM itop_tickets WHERE ' + scope_cond).fetchone()['t'] or ''
     return jsonify({
         'enabled': True, 'mcp_url': ITOP_MCP_URL,
         'total': total, 'by_class': by_class,
         'mapped_users': mapped_users, 'last_data_at': last_data,
         'sync_state': _ITOP_SYNC_STATE
     })
+
+
+def _itop_ticket_denied(conn, row):
+    """v28.5 工单访问校验：普通用户仅本人；子管理员限本团队映射工单；主管理员放行"""
+    if not session.get('is_admin'):
+        return row['user_id'] != session['user_id']
+    scope_team_id = get_admin_scope()
+    if scope_team_id is None:
+        return False
+    if not row['user_id']:
+        return True
+    owner = conn.execute('SELECT team_id FROM users WHERE id = ?', (row['user_id'],)).fetchone()
+    return (not owner) or owner['team_id'] != scope_team_id
 
 
 @app.route('/api/itop/tickets')
@@ -6415,10 +6477,23 @@ def itop_tickets_list():
     conn = get_db()
     where, params = [], []
     if session.get('is_admin') and request.args.get('scope') == 'team':
-        where.append('user_id IS NOT NULL')
+        scope_team_id = get_admin_scope()
+        if scope_team_id is not None:
+            # v28.5 子管理员：团队范围 = 本团队映射用户
+            where.append('user_id IN (SELECT id FROM users WHERE team_id = ?)')
+            params.append(scope_team_id)
+        else:
+            where.append('user_id IS NOT NULL')
     elif session.get('is_admin') and request.args.get('user_id'):
+        target_uid = int(request.args.get('user_id'))
+        scope_team_id = get_admin_scope()
+        if scope_team_id is not None:
+            in_team = conn.execute('SELECT id FROM users WHERE id = ? AND team_id = ?',
+                                   (target_uid, scope_team_id)).fetchone()
+            if not in_team:
+                return jsonify({'error': '无权查看该成员的工单'}), 403
         where.append('user_id = ?')
-        params.append(int(request.args.get('user_id')))
+        params.append(target_uid)
     else:
         where.append('user_id = ?')
         params.append(session['user_id'])
@@ -6465,7 +6540,7 @@ def itop_ticket_detail(cls, ref):
     if not row:
         return jsonify({'error': '工单不存在'}), 404
     row = dict(row)
-    if not session.get('is_admin') and row.get('user_id') != session['user_id']:
+    if _itop_ticket_denied(conn, row):
         return jsonify({'error': '无权访问'}), 403
     try:
         row['raw'] = json.loads(row.get('raw_data') or '{}')
@@ -6491,7 +6566,7 @@ def itop_ticket_add_log(cls, ref):
                        (cls, ref)).fetchone()
     if not row:
         return jsonify({'error': '工单不存在，请先同步'}), 404
-    if not session.get('is_admin') and row['user_id'] != session['user_id']:
+    if _itop_ticket_denied(conn, row):
         return jsonify({'error': '只能操作本人名下工单'}), 403
     try:
         key = int(row['ticket_key'] or 0)
@@ -6530,7 +6605,7 @@ def itop_ticket_apply_stimulus(cls, ref):
                        (cls, ref)).fetchone()
     if not row:
         return jsonify({'error': '工单不存在，请先同步'}), 404
-    if not session.get('is_admin') and row['user_id'] != session['user_id']:
+    if _itop_ticket_denied(conn, row):
         return jsonify({'error': '只能操作本人名下工单'}), 403
     try:
         key = int(row['ticket_key'] or 0)
