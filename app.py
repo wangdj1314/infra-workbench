@@ -112,6 +112,19 @@ def init_db():
         conn = sqlite3.connect()
         # 验证连接
         conn.execute('SELECT 1')
+        # v28.0：组织架构 - teams 表
+        conn.execute('''CREATE TABLE IF NOT EXISTS teams (
+            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+            name VARCHAR(100) NOT NULL UNIQUE,
+            parent_id INTEGER DEFAULT NULL,
+            description TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        # v28.0：users 表增加 team_id 列（子管理员/团队成员归属）
+        try:
+            conn.execute('ALTER TABLE users ADD COLUMN team_id INTEGER DEFAULT NULL')
+        except Exception:
+            pass  # 列已存在
         # 初始化默认板块（若表为空）
         try:
             area_count = conn.execute('SELECT COUNT(*) as c FROM responsibility_areas').fetchone()['c']
@@ -733,6 +746,7 @@ def list_users():
             'employee_id': u['employee_id'] or '',
             'email': u['email'] or '',
             'is_admin': bool(u['is_admin']),
+            'team_id': u['team_id'],
             'job_description': dict(u).get('job_description') or '',
             'responsibilities': dict(u).get('responsibilities') or '',
             'total_items': total,
@@ -1163,6 +1177,154 @@ def team_member_job_analysis(user_id):
         return jsonify({'analysis': analysis})
     except Exception as e:
         return jsonify({'error': f'AI 分析失败: {e}'}), 502
+
+
+# ====================================================================
+# v28.0：组织架构管理
+# ====================================================================
+@app.route('/api/org/teams')
+@login_required
+def list_teams():
+    """获取所有团队及其成员"""
+    db = get_db()
+    teams = db.execute('SELECT * FROM teams ORDER BY id').fetchall()
+    result = []
+    for t in teams:
+        members = db.execute(
+            'SELECT id, ad_username, display_name, section_name, is_admin, email, team_id '
+            'FROM users WHERE team_id = ? ORDER BY display_name',
+            (t['id'],)
+        ).fetchall()
+        result.append({
+            'id': t['id'],
+            'name': t['name'],
+            'parent_id': t['parent_id'],
+            'description': t['description'],
+            'member_count': len(members),
+            'members': [dict(m) for m in members]
+        })
+    return jsonify(result)
+
+
+@app.route('/api/org/teams', methods=['POST'])
+@admin_required
+def create_team():
+    """创建团队"""
+    data = request.get_json(silent=True) or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': '团队名称不能为空'}), 400
+    desc = (data.get('description') or '').strip()
+    parent_id = data.get('parent_id')
+    db = get_db()
+    try:
+        db.execute('INSERT INTO teams (name, description, parent_id) VALUES (?, ?, ?)',
+                   (name, desc, parent_id))
+        db.commit()
+        return jsonify({'ok': True, 'id': db.execute('SELECT LAST_INSERT_ID() as id').fetchone()['id']})
+    except Exception as e:
+        if 'Duplicate' in str(e):
+            return jsonify({'error': f'团队 "{name}" 已存在'}), 409
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/org/teams/<int:team_id>', methods=['PUT'])
+@admin_required
+def update_team(team_id):
+    """更新团队信息"""
+    data = request.get_json(silent=True) or {}
+    db = get_db()
+    team = db.execute('SELECT * FROM teams WHERE id = ?', (team_id,)).fetchone()
+    if not team:
+        return jsonify({'error': '团队不存在'}), 404
+    name = (data.get('name') or '').strip()
+    desc = (data.get('description') or '').strip()
+    parent_id = data.get('parent_id')
+    try:
+        db.execute('UPDATE teams SET name = ?, description = ?, parent_id = ? WHERE id = ?',
+                   (name, desc, parent_id, team_id))
+        db.commit()
+        return jsonify({'ok': True})
+    except Exception as e:
+        if 'Duplicate' in str(e):
+            return jsonify({'error': f'团队名称已存在'}), 409
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/org/teams/<int:team_id>', methods=['DELETE'])
+@admin_required
+def delete_team(team_id):
+    """删除团队（成员 team_id 置空）"""
+    db = get_db()
+    team = db.execute('SELECT * FROM teams WHERE id = ?', (team_id,)).fetchone()
+    if not team:
+        return jsonify({'error': '团队不存在'}), 404
+    # 检查子团队
+    children = db.execute('SELECT COUNT(*) as c FROM teams WHERE parent_id = ?', (team_id,)).fetchone()['c']
+    if children > 0:
+        return jsonify({'error': f'该团队下有 {children} 个子团队，请先删除子团队'}), 400
+    # 成员 team_id 置空
+    db.execute('UPDATE users SET team_id = NULL WHERE team_id = ?', (team_id,))
+    db.execute('DELETE FROM teams WHERE id = ?', (team_id,))
+    db.commit()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/org/teams/<int:team_id>/members', methods=['POST'])
+@admin_required
+def add_team_member(team_id):
+    """添加成员到团队（设置用户的 team_id）"""
+    data = request.get_json(silent=True) or {}
+    user_id = data.get('user_id')
+    is_team_admin = data.get('is_team_admin', False)
+    if not user_id:
+        return jsonify({'error': '缺少 user_id'}), 400
+    db = get_db()
+    team = db.execute('SELECT * FROM teams WHERE id = ?', (team_id,)).fetchone()
+    if not team:
+        return jsonify({'error': '团队不存在'}), 404
+    user = db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+    if not user:
+        return jsonify({'error': '用户不存在'}), 404
+    # 设置 team_id 和 is_admin（如果是子管理员）
+    db.execute('UPDATE users SET team_id = ?, is_admin = ? WHERE id = ?',
+               (team_id, 1 if is_team_admin else user['is_admin'], user_id))
+    db.commit()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/org/teams/<int:team_id>/members/<int:user_id>', methods=['DELETE'])
+@admin_required
+def remove_team_member(team_id, user_id):
+    """从团队移除成员（team_id 置空，如果是子管理员则降级为普通用户）"""
+    db = get_db()
+    user = db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+    if not user:
+        return jsonify({'error': '用户不存在'}), 404
+    if user['team_id'] != team_id:
+        return jsonify({'error': '该用户不在此团队中'}), 400
+    # team_id 置空；如果是此团队的子管理员，降为普通用户
+    db.execute('UPDATE users SET team_id = NULL WHERE id = ?', (user_id,))
+    db.commit()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/org/teams/<int:team_id>/members/<int:user_id>', methods=['PUT'])
+@admin_required
+def update_team_member_role(team_id, user_id):
+    """更新团队成员角色（子管理员/普通成员）"""
+    data = request.get_json(silent=True) or {}
+    is_team_admin = data.get('is_team_admin', False)
+    db = get_db()
+    user = db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+    if not user:
+        return jsonify({'error': '用户不存在'}), 404
+    if user['team_id'] != team_id:
+        return jsonify({'error': '该用户不在此团队中'}), 400
+    db.execute('UPDATE users SET is_admin = ? WHERE id = ?',
+               (1 if is_team_admin else 0, user_id))
+    db.commit()
+    return jsonify({'ok': True})
 
 
 # ====================================================================

@@ -2,6 +2,15 @@
 
 版本规则：主版本号跟随年份迭代（v25.x → v26.0），功能变更在本文件登记。
 
+## v28.0（2026-08-18）
+
+### 新增：组织架构管理
+- **团队管理**：新增「组织架构」Tab（管理员可见），支持创建/编辑/删除团队，团队支持层级关系（`parent_id`）
+- **成员管理**：团队卡片内展示成员列表，支持添加/移除成员，可设置团队子管理员（`is_admin=1 + team_id`）
+- **数据模型**：新增 `teams` 表（id/name/parent_id/description），`users` 表新增 `team_id` 列；`init_db()` 自动建表 + 幂等 ALTER
+- **API**：`GET/POST/PUT/DELETE /api/org/teams`、`POST/DELETE/PUT /api/org/teams/<id>/members`
+- **初始数据**：创建「信息安全团队」，成员团队成员（子管理员）、团队成员、团队成员
+
 ## v27.2（2026-08-18）
 
 ### 增强：AI 功能接入 ITSM 工单数据

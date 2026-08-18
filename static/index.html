@@ -7,7 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <title>基础架构工作台</title>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=27.1">
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=28.0">
 <style>
 :root{
   --bg:#0d1117;--surface:#161b22;--surface2:#21262d;--border:#30363d;
@@ -611,7 +611,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="login-card">
     <div class="login-logo">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <h1>基础架构工作台 <span class="version-badge">v27.2</span></h1>
+      <h1>基础架构工作台 <span class="version-badge">v28.0</span></h1>
       <p>Infrastructure Team Workbench</p>
     </div>
     <div id="loginError" class="login-error hidden"></div>
@@ -636,7 +636,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="topbar">
     <div class="topbar-left">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" style="width:22px;height:22px"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v27.2">v27.2</span>
+      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v28.0">v28.0</span>
     </div>
     <div class="topbar-right">
       <div class="ai-token-badge" onclick="switchTab('apikey')" title="AI Token 消耗">
@@ -688,6 +688,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
         <div class="tab" data-tab="itop" onclick="switchTab('itop')">ITSM 工单</div>
         <div class="tab hidden" data-tab="team" onclick="switchTab('team')">团队概览</div>
         <div class="tab hidden" data-tab="members" onclick="switchTab('members')">成员管理</div>
+        <div class="tab hidden" data-tab="org" onclick="switchTab('org')">组织架构</div>
         <div class="tab hidden" data-tab="manage" onclick="switchTab('manage')">工作内容管理</div>
         <div class="tab hidden" data-tab="links" onclick="switchTab('links')">链接管理</div>
         <div class="tab hidden" data-tab="tools" onclick="switchTab('tools')">小工具管理</div>
@@ -795,6 +796,15 @@ input,select,textarea{font-family:inherit;font-size:14px}
           <div id="areaConfigPanel" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px">
             <p class="ai-hint">加载中...</p>
           </div>
+        </div>
+
+        <!-- Organization Structure Tab -->
+        <div id="tab-org" class="hidden">
+          <div class="section-header">
+            <h2>组织架构管理</h2>
+            <button class="btn btn-primary-sm" onclick="showAddTeamModal()">+ 新建团队</button>
+          </div>
+          <div id="orgTeamList" style="display:flex;flex-direction:column;gap:16px"></div>
         </div>
 
         <!-- Work Item Management Tab -->
@@ -1054,6 +1064,7 @@ function showApp() {
     document.querySelector('[data-tab="manage"]').classList.remove('hidden');
     document.querySelector('[data-tab="links"]').classList.remove('hidden');
     document.querySelector('[data-tab="tools"]').classList.remove('hidden');
+    document.querySelector('[data-tab="org"]').classList.remove('hidden');
     document.getElementById('reportUserFilter').style.display = '';
   }
   // hash路由：根据URL hash决定初始tab
@@ -1175,6 +1186,7 @@ function switchTab(tab) {
   if (tab === 'manage') loadAdminWorkItems();
   if (tab === 'links') loadAdminLinks();
   if (tab === 'tools') loadAdminTools();
+  if (tab === 'org') loadOrgTeams();
   if (tab === 'apikey') { loadApiKeys(); loadAiUsage(); loadMcpConfig(); }
   if (tab === 'kb') { loadDingtalkStatus(); loadKnowledge(); }
   // hash路由：切换tab时更新URL
@@ -4977,6 +4989,148 @@ function switchHelpSection(sec) {
 function escapeHtml(s) {
   if (!s) return '';
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// ---- v28.0 组织架构管理 ----
+let _orgTeams = [];
+let _orgAllUsers = [];
+
+async function loadOrgTeams() {
+  try {
+    const res = await fetch('/api/org/teams');
+    if (!res.ok) return;
+    _orgTeams = await res.json();
+    // 获取所有用户（用于添加成员选择）
+    const ures = await fetch('/api/admin/users');
+    if (ures.ok) _orgAllUsers = await ures.json();
+    renderOrgTeams();
+  } catch(e) { console.error(e); }
+}
+
+function renderOrgTeams() {
+  const box = document.getElementById('orgTeamList');
+  if (!box) return;
+  if (!_orgTeams.length) {
+    box.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:40px">暂无团队，点击右上角创建</div>';
+    return;
+  }
+  box.innerHTML = _orgTeams.map(t => {
+    const members = t.members || [];
+    const memberRows = members.map(m => {
+      const roleBadge = m.is_admin ? '<span class="badge" style="background:#f59e0b;color:#fff;font-size:10px;padding:2px 6px;margin-left:6px">子管理员</span>' : '';
+      const removeBtn = `<button class="btn btn-sm" style="padding:2px 8px;font-size:11px" onclick="orgRemoveMember(${t.id},${m.id})">移除</button>`;
+      const toggleBtn = m.is_admin
+        ? `<button class="btn btn-sm" style="padding:2px 8px;font-size:11px" onclick="orgToggleAdmin(${t.id},${m.id},false)">降级为成员</button>`
+        : `<button class="btn btn-sm" style="padding:2px 8px;font-size:11px" onclick="orgToggleAdmin(${t.id},${m.id},true)">设为子管理员</button>`;
+      return `<tr>
+        <td>${escapeHtml(m.display_name)}${roleBadge}</td>
+        <td>${escapeHtml(m.ad_username)}</td>
+        <td>${escapeHtml(m.section_name || '')}</td>
+        <td style="white-space:nowrap">${toggleBtn} ${removeBtn}</td>
+      </tr>`;
+    }).join('');
+    return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:var(--bg-card);border-bottom:1px solid var(--border)">
+        <div>
+          <strong style="font-size:15px">${escapeHtml(t.name)}</strong>
+          <span style="color:var(--text-muted);margin-left:8px;font-size:12px">${t.member_count} 人</span>
+          ${t.description ? `<span style="color:var(--text-muted);margin-left:12px;font-size:12px">· ${escapeHtml(t.description)}</span>` : ''}
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-primary-sm" style="padding:4px 10px;font-size:12px" onclick="showAddMemberToTeamModal(${t.id})">+ 添加成员</button>
+          <button class="btn btn-sm" style="padding:4px 10px;font-size:12px" onclick="showEditTeamModal(${t.id})">编辑</button>
+          <button class="btn btn-sm" style="padding:4px 10px;font-size:12px;color:#ef4444" onclick="deleteTeam(${t.id})">删除</button>
+        </div>
+      </div>
+      <table style="width:100%;font-size:13px">
+        <thead><tr style="background:var(--bg-main)"><th style="padding:8px 16px;text-align:left">姓名</th><th style="padding:8px 16px;text-align:left">AD 账号</th><th style="padding:8px 16px;text-align:left">板块</th><th style="padding:8px 16px;text-align:right">操作</th></tr></thead>
+        <tbody>${memberRows || '<tr><td colspan="4" style="text-align:center;padding:16px;color:var(--text-muted)">暂无成员</td></tr>'}</tbody>
+      </table>
+    </div>`;
+  }).join('');
+}
+
+function showAddTeamModal() {
+  const name = prompt('团队名称：');
+  if (!name) return;
+  const desc = prompt('团队描述（可选）：') || '';
+  fetch('/api/org/teams', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name, description: desc})
+  }).then(r => r.json()).then(d => {
+    if (d.error) { alert(d.error); return; }
+    loadOrgTeams();
+  });
+}
+
+function showEditTeamModal(teamId) {
+  const t = _orgTeams.find(x => x.id === teamId);
+  if (!t) return;
+  const name = prompt('团队名称：', t.name);
+  if (!name) return;
+  const desc = prompt('团队描述：', t.description || '') || '';
+  fetch('/api/org/teams/' + teamId, {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name, description: desc})
+  }).then(r => r.json()).then(d => {
+    if (d.error) { alert(d.error); return; }
+    loadOrgTeams();
+  });
+}
+
+function deleteTeam(teamId) {
+  const t = _orgTeams.find(x => x.id === teamId);
+  if (!t) return;
+  if (!confirm(`确定删除团队「${t.name}」？团队成员不会被删除，只是解除归属关系。`)) return;
+  fetch('/api/org/teams/' + teamId, {method: 'DELETE'})
+    .then(r => r.json()).then(d => {
+      if (d.error) { alert(d.error); return; }
+      loadOrgTeams();
+    });
+}
+
+function showAddMemberToTeamModal(teamId) {
+  // 获取未分配团队的用户
+  const available = _orgAllUsers.filter(u => !u.team_id);
+  if (!available.length) { alert('所有成员都已分配团队'); return; }
+  const names = available.map((u, i) => `${i+1}. ${u.display_name} (${u.ad_username})`).join('\n');
+  const choice = prompt(`选择要添加的成员（输入序号）：\n\n${names}`);
+  if (!choice) return;
+  const idx = parseInt(choice) - 1;
+  if (idx < 0 || idx >= available.length) { alert('无效序号'); return; }
+  const user = available[idx];
+  const isAdmin = confirm(`将 ${user.display_name} 设为子管理员？\n\n确定 = 子管理员\n取消 = 普通成员`);
+  fetch('/api/org/teams/' + teamId + '/members', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({user_id: user.id, is_team_admin: isAdmin})
+  }).then(r => r.json()).then(d => {
+    if (d.error) { alert(d.error); return; }
+    loadOrgTeams();
+  });
+}
+
+function orgRemoveMember(teamId, userId) {
+  const u = _orgAllUsers.find(x => x.id === userId);
+  if (!confirm(`确定将 ${u ? u.display_name : '该成员'} 从团队移除？`)) return;
+  fetch('/api/org/teams/' + teamId + '/members/' + userId, {method: 'DELETE'})
+    .then(r => r.json()).then(d => {
+      if (d.error) { alert(d.error); return; }
+      loadOrgTeams();
+    });
+}
+
+function orgToggleAdmin(teamId, userId, makeAdmin) {
+  fetch('/api/org/teams/' + teamId + '/members/' + userId, {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({is_team_admin: makeAdmin})
+  }).then(r => r.json()).then(d => {
+    if (d.error) { alert(d.error); return; }
+    loadOrgTeams();
+  });
 }
 
 // ---- Init ----
