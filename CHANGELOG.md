@@ -2,6 +2,10 @@
 
 版本规则：主版本号跟随年份迭代（v25.x → v26.0），功能变更在本文件登记。
 
+## v26.7（2026-08-18）
+
+- **修复平均耗时统计为 0**：完成任务时若未点击「开始」（`started_at` 为空），耗时不计算导致平均耗时显示 0 分钟。改为用 `created_at` 兜底作为起始时间；同时回刷历史已完成任务的耗时数据
+
 ## v26.6（2026-08-18）
 
 - **修复 DWS 同步 0 条**：MySQL 迁移后 `_save_knowledge`/每日同步日志使用 SQLite `ON CONFLICT` 语法导致写入全部失败（1064），改为 `ON DUPLICATE KEY UPDATE`，并补建 `user_knowledge(user_id,source,external_id)`、`dingtalk_sync_log(sync_date)` 唯一索引；聊天消息分页 cursor 统一 str() 防 subprocess 类型错误。数据从上次成功同步点起补齐至当前时刻

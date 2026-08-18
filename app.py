@@ -1267,9 +1267,11 @@ def update_work_item(item_id):
         if ns == 'in_progress' and item['status'] != 'in_progress':
             updates.append('started_at = ?')
             params.append(now)
-        elif ns == 'completed' and item['started_at']:
+        elif ns == 'completed':
             try:
-                started = datetime.fromisoformat(item['started_at'])
+                # v26.7：若无 started_at（未点开始直接完成），用 created_at 兜底
+                started_str = item['started_at'] or item['created_at']
+                started = datetime.fromisoformat(started_str)
                 completed = datetime.fromisoformat(now)
                 duration = int((completed - started).total_seconds() / 60)
                 updates.append('actual_duration_minutes = ?')
