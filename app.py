@@ -961,6 +961,69 @@ def add_user():
     }), 201
 
 
+@app.route('/api/admin/users/sync-ad', methods=['POST'])
+@admin_required
+def admin_users_sync_ad():
+    """v28.6：从域控批量回填成员工号/岗位/邮箱（仅填空缺字段，不覆盖已填内容）；
+    子管理员只同步本团队成员"""
+    db = get_db()
+    scope_team_id = get_admin_scope()
+    if scope_team_id:
+        users = db.execute(
+            'SELECT id, ad_username, display_name, employee_id, email, job_description '
+            'FROM users WHERE ad_username IS NOT NULL AND ad_username != "" AND team_id = ?',
+            (scope_team_id,)).fetchall()
+    else:
+        users = db.execute(
+            'SELECT id, ad_username, display_name, employee_id, email, job_description '
+            'FROM users WHERE ad_username IS NOT NULL AND ad_username != ""').fetchall()
+    if not users:
+        return jsonify({'updated': 0, 'total': 0, 'details': []})
+
+    by_ad = {u['ad_username'].lower(): u for u in users}
+    details, updated = [], 0
+    conn = None
+    try:
+        conn = _ldap_admin_conn()
+        ads = list(by_ad.keys())
+        for i in range(0, len(ads), 50):
+            batch = ads[i:i + 50]
+            flt = '(&(objectClass=user)(|' + ''.join(
+                '(sAMAccountName=%s)' % a for a in batch) + '))'
+            conn.search(search_base=LDAP_BASE, search_filter=flt,
+                        attributes=['sAMAccountName', 'displayName', 'employeeID', 'title', 'mail'])
+            for e in conn.entries:
+                ad = str(e.sAMAccountName.value or '').strip().lower()
+                u = by_ad.get(ad)
+                if not u:
+                    continue
+                emp = str(e.employeeID.value or '').strip() if e.employeeID else ''
+                title = str(e.title.value or '').strip() if e.title else ''
+                mail = str(e.mail.value or '').strip() if e.mail else ''
+                sets, vals, filled = [], [], []
+                if emp and not (u['employee_id'] or '').strip():
+                    sets.append('employee_id = ?'); vals.append(emp); filled.append('工号')
+                if title and not (u['job_description'] or '').strip():
+                    sets.append('job_description = ?'); vals.append(title); filled.append('岗位')
+                if mail and not (u['email'] or '').strip():
+                    sets.append('email = ?'); vals.append(mail); filled.append('邮箱')
+                if sets:
+                    vals.append(u['id'])
+                    db.execute('UPDATE users SET ' + ', '.join(sets) + ' WHERE id = ?', vals)
+                    updated += 1
+                    details.append({'ad_username': ad, 'display_name': u['display_name'], 'filled': filled})
+        db.commit()
+    except Exception as e:
+        return jsonify({'error': f'AD 同步失败: {e}'}), 502
+    finally:
+        if conn:
+            try:
+                conn.unbind()
+            except Exception:
+                pass
+    return jsonify({'updated': updated, 'total': len(users), 'details': details})
+
+
 @app.route('/api/admin/users/<int:user_id>', methods=['PUT'])
 @admin_required
 def update_user(user_id):
@@ -3886,6 +3949,7 @@ def stats():
         _uteam = ('WHERE u.team_id = %d' % scope_team_id) if scope_team_id else ''
         user_stats = db.execute(f"""
             SELECT u.id, u.display_name, u.section_name, u.ad_username,
+                u.employee_id, u.email, u.job_description,
                 COUNT(w.id) as total,
                 SUM(CASE WHEN w.status='completed' THEN 1 ELSE 0 END) as completed,
                 SUM(CASE WHEN w.status='pending' THEN 1 ELSE 0 END) as pending,

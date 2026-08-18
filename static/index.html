@@ -611,7 +611,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="login-card">
     <div class="login-logo">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <h1>基础架构工作台 <span class="version-badge">v28.5</span></h1>
+      <h1>基础架构工作台 <span class="version-badge">v28.6</span></h1>
       <p>Infrastructure Team Workbench</p>
     </div>
     <div id="loginError" class="login-error hidden"></div>
@@ -636,7 +636,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="topbar">
     <div class="topbar-left">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" style="width:22px;height:22px"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v28.5">v28.5</span>
+      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v28.6">v28.6</span>
     </div>
     <div class="topbar-right">
       <div class="ai-token-badge" onclick="switchTab('apikey')" title="AI Token 消耗">
@@ -3475,7 +3475,7 @@ function _memberCardHtml(u) {
         <div class="member-card-avatar">${u.display_name.charAt(0)}</div>
         <div class="member-card-info">
           <h4>${escapeHtml(u.display_name)}${dtBadge}</h4>
-          <p>${escapeHtml(u.section_name||'未分配板块')}</p>
+          <p>${escapeHtml(u.job_description || u.section_name || '未设置岗位')}${u.employee_id ? ' · ' + escapeHtml(u.employee_id) : ''}</p>
         </div>
       </div>
     </div>
@@ -3499,7 +3499,10 @@ function _memberCardHtml(u) {
       <span>ITSM: 处理中 <strong style="color:var(--primary)">${u.itop_active||0}</strong></span>
       <span>本月完成工单 <strong style="color:var(--success)">${u.itop_month_closed||0}</strong></span>
     </div>
-    <p style="font-size:12px;color:var(--muted);margin-top:4px">完成率 ${rate}% &middot; 点击查看详情</p>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+      <p style="font-size:12px;color:var(--muted)">完成率 ${rate}% &middot; 点击查看详情</p>
+      ${u.job_description ? `<button class="btn btn-sm btn-ai" style="font-size:11px;padding:2px 8px" onclick="event.stopPropagation();analyzeMemberJob(${u.id})">AI 岗位分析</button>` : ''}
+    </div>
   </div>`;
 }
 async function loadTeamOverview() {
@@ -3582,7 +3585,7 @@ async function showEmployeeDetail(userId) {
             <div class="emp-avatar">${u.display_name.charAt(0)}</div>
             <div>
               <h3>${escapeHtml(u.display_name)}</h3>
-              <p>${escapeHtml(u.section_name||'')} | ${escapeHtml(u.employee_id||'')} | ${escapeHtml(u.email||'')}</p>
+              <p>${[u.job_description, u.employee_id, u.email].filter(x => x && String(x).trim()).map(escapeHtml).join(' | ') || escapeHtml(u.section_name||'')}</p>
             </div>
           </div>
           <div class="emp-detail-stats">
@@ -3705,13 +3708,27 @@ async function loadMembers() {
         </table>
       </div>`;
     }
-    teamBox.innerHTML = sectionsHtml;
+    teamBox.innerHTML = `<div style="display:flex;justify-content:flex-end;margin-bottom:8px">
+      <button class="btn btn-sm" onclick="syncAdFields()">⇅ 从 AD 同步工号/岗位/邮箱</button>
+    </div>` + sectionsHtml;
     // 团队section已创建，渲染各团队的板块面板
     renderAllAreaPanels();
   } catch(err) {
     const teamBox = document.getElementById('membersTeamSections');
     if (teamBox) teamBox.innerHTML = `<p style="text-align:center;padding:40px;color:var(--danger)">${err.message}</p>`;
   }
+}
+
+// v28.6：从 AD 批量同步工号/岗位/邮箱（仅回填空缺字段）
+async function syncAdFields() {
+  if (!confirm('从域控同步成员的工号、岗位、邮箱？\n（仅回填空缺字段，不覆盖已填内容）')) return;
+  try {
+    const r = await api('/api/admin/users/sync-ad', {method:'POST', body:JSON.stringify({})});
+    const ds = (r.details||[]).map(d => `${d.display_name}: ${d.filled.join('/')}`).join('\n');
+    alert(`同步完成：${r.updated}/${r.total} 人更新${r.updated ? '\n\n' + ds : '（无空缺字段需要回填）'}`);
+    loadMembers();
+    membersCache = [];
+  } catch(err) { alert('同步失败: ' + err.message); }
 }
 
 function showAddMemberModal(teamId) {
