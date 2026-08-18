@@ -9,3 +9,4 @@ data/last_daily_sync.txt
 dist/
 build/
 .venv/
+data/uploads/

@@ -7,10 +7,11 @@ LDAP/AD 认证 + 团队管理 + 工作项 CRUD + 周期任务 + AI 原生功能
 import os
 import re
 import json
-import sqlite3
+import _db_shim as sqlite3
 import calendar
 import threading
 import time
+import uuid
 import secrets
 import hashlib
 from datetime import datetime, date, timedelta
@@ -50,7 +51,14 @@ LDAP_DOMAIN = os.environ.get('LDAP_DOMAIN', 'your-domain.local')
 LDAP_BIND_USER = os.environ.get('LDAP_BIND_USER', r'YOUR_DOMAIN\YOUR_ADMIN_USER')
 LDAP_BIND_PASS = os.environ.get('LDAP_BIND_PASS', '')
 ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'wangdj')
-DB_PATH = os.environ.get('DB_PATH', '/app/data/workbench.db')
+# MySQL 配置（通过环境变量覆盖）
+MYSQL_HOST = os.environ.get('MYSQL_HOST', '172.17.0.1')
+MYSQL_PORT = int(os.environ.get('MYSQL_PORT', '3308'))
+MYSQL_USER = os.environ.get('MYSQL_USER', 'root')
+MYSQL_PASS = os.environ.get('MYSQL_PASS', 'YOUR_DB_PASSWORD')
+MYSQL_DB = os.environ.get('MYSQL_DB', 'workbench')
+_sqlite3 = sqlite3  # alias for isinstance checks
+_sqlite3.configure(host=MYSQL_HOST, port=MYSQL_PORT, user=MYSQL_USER, password=MYSQL_PASS, database=MYSQL_DB)
 UPLOAD_DIR = os.environ.get('UPLOAD_DIR', '/app/data/uploads')
 
 # AI 配置（Xinference / OpenAI 兼容接口）
@@ -76,11 +84,7 @@ DEFAULT_CATEGORIES = [
 def get_db():
     db = getattr(g, '_database', None)
     if db is None:
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-        db = g._database = sqlite3.connect(DB_PATH)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA foreign_keys = ON")
-        db.execute("PRAGMA journal_mode = WAL")
+        db = g._database = sqlite3.connect()
     return db
 
 
@@ -92,18 +96,7 @@ def close_db(error):
 
 
 def _ensure_column(conn, table, column, ddl):
-    cols = [r[1] for r in conn.execute(f'PRAGMA table_info({table})').fetchall()]
-    if column not in cols:
-        try:
-            conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {ddl}')
-        except sqlite3.OperationalError as e:
-            # SQLite 限制：当 DEFAULT 包含 CURRENT_TIMESTAMP 等非常量时拒绝；
-            # 回退为两步：先加列不带默认值，再用 CURRENT_TIMESTAMP 回填已有行。
-            if 'non-constant default' in str(e).lower():
-                conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} TEXT')
-                conn.execute(f'UPDATE {table} SET {column} = CURRENT_TIMESTAMP WHERE {column} IS NULL')
-            else:
-                raise
+    pass  # MySQL 迁移后所有列已存在，无需动态添加
 
 
 def _now_str():
@@ -112,455 +105,50 @@ def _now_str():
 
 
 def init_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    """MySQL 初始化：表已由迁移脚本创建，仅做种子数据和连接验证。"""
     os.makedirs(UPLOAD_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.executescript("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ad_username TEXT UNIQUE NOT NULL,
-        display_name TEXT NOT NULL,
-        section_name TEXT DEFAULT '',
-        employee_id TEXT DEFAULT '',
-        email TEXT DEFAULT '',
-        is_admin INTEGER DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE TABLE IF NOT EXISTS work_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        title TEXT NOT NULL,
-        description TEXT DEFAULT '',
-        category TEXT DEFAULT '日常运维',
-        priority TEXT DEFAULT 'P2',
-        status TEXT DEFAULT 'pending',
-        due_date TEXT DEFAULT '',
-        created_by TEXT DEFAULT '',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        completed_at TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS work_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        action TEXT,
-        item_id INTEGER,
-        detail TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE TABLE IF NOT EXISTS ai_usage (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        feature TEXT NOT NULL,
-        prompt_tokens INTEGER DEFAULT 0,
-        completion_tokens INTEGER DEFAULT 0,
-        total_tokens INTEGER DEFAULT 0,
-        model TEXT DEFAULT '',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE TABLE IF NOT EXISTS categories (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE NOT NULL,
-        color TEXT DEFAULT '',
-        sort_order INTEGER DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE TABLE IF NOT EXISTS quick_links (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        title TEXT NOT NULL,
-        url TEXT NOT NULL,
-        icon TEXT DEFAULT '',
-        sort_order INTEGER DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS user_widgets (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        title TEXT NOT NULL,
-        kind TEXT DEFAULT 'iframe',
-        icon TEXT DEFAULT '',
-        url TEXT DEFAULT '',
-        config TEXT DEFAULT '',
-        sort_order INTEGER DEFAULT 0,
-        enabled INTEGER DEFAULT 1,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS api_keys (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        key_hash TEXT UNIQUE NOT NULL,
-        key_prefix TEXT DEFAULT '',
-        label TEXT DEFAULT '',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        last_used_at TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS deliverables (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        work_item_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL,
-        filename TEXT NOT NULL,
-        filepath TEXT NOT NULL,
-        filesize INTEGER DEFAULT 0,
-        mimetype TEXT DEFAULT '',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (work_item_id) REFERENCES work_items (id) ON DELETE CASCADE,
-        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS work_item_milestones (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        work_item_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL,
-        created_by TEXT DEFAULT '',
-        status_label TEXT NOT NULL,
-        note TEXT DEFAULT '',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (work_item_id) REFERENCES work_items (id) ON DELETE CASCADE,
-        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_milestones_item ON work_item_milestones(work_item_id);
-
-    CREATE TABLE IF NOT EXISTS reports (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        type TEXT NOT NULL,
-        content TEXT NOT NULL,
-        period_start TEXT,
-        period_end TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS external_sync_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        source TEXT DEFAULT '',
-        action TEXT,
-        item_id INTEGER,
-        detail TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE TABLE IF NOT EXISTS dingtalk_bindings (
-        user_id INTEGER PRIMARY KEY,
-        union_id TEXT,
-        access_token TEXT,
-        refresh_token TEXT,
-        expires_at TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS user_knowledge (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        source TEXT NOT NULL,
-        title TEXT NOT NULL,
-        content TEXT,
-        raw_data TEXT,
-        external_id TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_work_items_user ON work_items(user_id);
-    CREATE INDEX IF NOT EXISTS idx_work_items_status ON work_items(status);
-    CREATE INDEX IF NOT EXISTS idx_ai_usage_user ON ai_usage(user_id);
-    CREATE INDEX IF NOT EXISTS idx_quick_links_user ON quick_links(user_id);
-    CREATE INDEX IF NOT EXISTS idx_user_widgets_user ON user_widgets(user_id);
-    CREATE INDEX IF NOT EXISTS idx_deliverables_item ON deliverables(work_item_id);
-    CREATE INDEX IF NOT EXISTS idx_reports_user ON reports(user_id);
-    """)
-    # 周期任务字段迁移
-    _ensure_column(conn, 'work_items', 'recurring', "TEXT DEFAULT ''")
-    _ensure_column(conn, 'work_items', 'next_run_at', "TEXT DEFAULT ''")
-    _ensure_column(conn, 'work_items', 'source_id', 'INTEGER')
-    # 转办/协同字段
-    _ensure_column(conn, 'work_items', 'transferred_to', 'INTEGER')
-    _ensure_column(conn, 'work_items', 'collaborators', "TEXT DEFAULT ''")
-    # v25.4：外部协同人（手动输入的人员姓名/供应商名称），与系统内协同者区分
-    _ensure_column(conn, 'work_items', 'external_collaborators', "TEXT DEFAULT ''")
-    # 主/子任务关联
-    _ensure_column(conn, 'work_items', 'parent_id', 'INTEGER')
-    # 常用链接磁贴：自定义颜色
-    _ensure_column(conn, 'quick_links', 'color', "TEXT DEFAULT ''")
-    # 时效管理：任务开始时间、实际耗时（分钟）
-    _ensure_column(conn, 'work_items', 'started_at', 'TIMESTAMP')
-    _ensure_column(conn, 'work_items', 'actual_duration_minutes', 'INTEGER DEFAULT 0')
-    # v23：任务来源标记（manual 手工 / ai AI协作 / dingtalk 钉钉同步），供 AI 工具联动展示
-    _ensure_column(conn, 'work_items', 'source', "TEXT DEFAULT 'manual'")
-    # v24：来源工具标识（如 workbuddy / qoder）+ MCP Token 前缀（每用户 token 唯一，用于溯源"谁通过哪个工具创建"）
-    _ensure_column(conn, 'work_items', 'tool_label', "TEXT DEFAULT ''")
-    _ensure_column(conn, 'work_items', 'mcp_token_prefix', "TEXT DEFAULT ''")
-    # 知识库去重（同源同外部ID只保留一条，重复同步时更新）
     try:
-        conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_uniq ON user_knowledge(user_id, source, external_id)')
-    except Exception:
-        pass
-    # 知识库实际发生时间（今日维度按实际时间排序，而非同步时间）
-    _ensure_column(conn, 'user_knowledge', 'event_time', "TEXT DEFAULT ''")
-    _ensure_column(conn, 'user_knowledge', 'occur_date', "TEXT DEFAULT ''")
-    # v25.7：聊天记录会话类型（p2p 单聊 / group 群聊），用于报告/AI建议过滤群聊噪音
-    _ensure_column(conn, 'user_knowledge', 'conversation_type', "TEXT DEFAULT ''")
-    try:
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_knowledge_time ON user_knowledge(user_id, source, event_time)')
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_knowledge_conv ON user_knowledge(user_id, source, conversation_type)')
-    except Exception:
-        pass
-    # 报告：结构化 HTML 版本 + 统计数据（v9 报告优化）
-    _ensure_column(conn, 'reports', 'content_html', "TEXT DEFAULT ''")
-    _ensure_column(conn, 'reports', 'stats', "TEXT DEFAULT ''")
-    # v15：内置 AI 分析字段（关键工作内容/对话主题/待办时效），存 JSON
-    _ensure_column(conn, 'reports', 'ai_insights', "TEXT DEFAULT ''")
-    # v15：钉钉全量同步状态（首次 30 天全量后台同步，后续增量）
-    _ensure_column(conn, 'dingtalk_bindings', 'full_synced_at', "TEXT DEFAULT ''")
-    _ensure_column(conn, 'dingtalk_bindings', 'sync_status', "TEXT DEFAULT ''")
-    # v25.7：钉钉每日同步日志（日期、触发时间、绑定用户数、各类别条数）
-    conn.executescript("""
-    CREATE TABLE IF NOT EXISTS dingtalk_sync_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        sync_date TEXT NOT NULL,
-        sync_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        user_count INTEGER DEFAULT 0,
-        chat_count INTEGER DEFAULT 0,
-        todo_count INTEGER DEFAULT 0,
-        calendar_count INTEGER DEFAULT 0,
-        minutes_count INTEGER DEFAULT 0,
-        status TEXT DEFAULT 'ok',
-        detail TEXT DEFAULT ''
-    );
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_log_date ON dingtalk_sync_log(sync_date);
-    """)
-    # v25.7：常用链接关联公共池
-    _ensure_column(conn, 'quick_links', 'pool_id', 'INTEGER DEFAULT 0')
-    # v16：负责板块多选 + 板块自定义管理
-    _ensure_column(conn, 'users', 'responsibilities', "TEXT DEFAULT ''")
-    conn.executescript("""
-    CREATE TABLE IF NOT EXISTS responsibility_areas (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL UNIQUE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    """)
-    # 初始化默认板块（若表为空）
-    try:
-        area_count = conn.execute('SELECT COUNT(*) as c FROM responsibility_areas').fetchone()['c']
-        if area_count == 0:
-            for a in ['IT基础设施','网络运维','系统运维','信息安全','数据中心','云运维','终端运维','应用运维']:
-                try:
-                    conn.execute('INSERT INTO responsibility_areas (name) VALUES (?)', (a,))
-                except sqlite3.IntegrityError:
-                    pass
-    except Exception:
-        pass
-    # MCP 服务端：每用户独立配置与鉴权
-    conn.executescript("""
-    CREATE TABLE IF NOT EXISTS mcp_configs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL UNIQUE,
-        enabled INTEGER DEFAULT 1,
-        auth_token_hash TEXT NOT NULL,
-        auth_token_prefix TEXT DEFAULT '',
-        allowed_tools TEXT DEFAULT '*',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_mcp_user ON mcp_configs(user_id);
-
-    CREATE TABLE IF NOT EXISTS mcp_tokens (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        label TEXT DEFAULT '',
-        auth_token_hash TEXT NOT NULL,
-        auth_token_prefix TEXT DEFAULT '',
-        enabled INTEGER DEFAULT 1,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        last_used_at TEXT DEFAULT '',
-        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_mcp_tokens_hash ON mcp_tokens(auth_token_hash);
-    CREATE INDEX IF NOT EXISTS idx_mcp_tokens_user ON mcp_tokens(user_id);
-    """)
-    # 向后兼容：为旧库添加新列
-    _ensure_column(conn, 'mcp_configs', 'updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
-    # v25.9：多 Token 迁移——旧单 token（mcp_configs）迁移到 mcp_tokens，label 标记为"默认"
-    try:
-        legacy = conn.execute(
-            "SELECT c.user_id, c.auth_token_hash, c.auth_token_prefix, c.created_at FROM mcp_configs c "
-            "WHERE c.auth_token_hash != '' AND NOT EXISTS "
-            "(SELECT 1 FROM mcp_tokens t WHERE t.user_id = c.user_id AND t.auth_token_hash = c.auth_token_hash)"
-        ).fetchall()
-        for r in legacy:
-            conn.execute(
-                "INSERT INTO mcp_tokens (user_id, label, auth_token_hash, auth_token_prefix, created_at) "
-                "VALUES (?, '默认', ?, ?, ?)",
-                (r['user_id'], r['auth_token_hash'], r['auth_token_prefix'] or '', r['created_at'])
-            )
-        if legacy:
-            conn.commit()
-            print(f'[init_db] migrated {len(legacy)} legacy MCP tokens to mcp_tokens')
-    except Exception as e:
-        print(f'[init_db] mcp_tokens migration skipped: {e}')
-    _ensure_column(conn, 'users', 'job_description', 'TEXT DEFAULT \'\'')
-    _ensure_column(conn, 'work_items', 'event_time', 'TEXT DEFAULT \'\'')
-    _ensure_column(conn, 'work_items', 'occur_date', 'TEXT DEFAULT \'\'')
-    _ensure_column(conn, 'reports', 'content_html', 'TEXT DEFAULT \'\'')
-    _ensure_column(conn, 'work_items', 'completion_note', 'TEXT DEFAULT \'\'')
-    _ensure_column(conn, 'work_items', 'sort_order', 'INTEGER DEFAULT 0')
-
-    # v25.6：轻量磁贴广场 —— 公共链接池 / 公共小工具池 / 用户磁贴实例
-    conn.executescript("""
-    CREATE TABLE IF NOT EXISTS tile_link_pool (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        url TEXT NOT NULL,
-        icon TEXT DEFAULT '',
-        color TEXT DEFAULT '',
-        created_by INTEGER,
-        use_count INTEGER DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE SET NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_tile_link_pool_title ON tile_link_pool(title);
-    """)
-    _ensure_column(conn, 'tile_link_pool', 'updated_at', "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-    # v25.9：小工具公共池关联（参照 quick_links.pool_id 模式）
-    _ensure_column(conn, 'user_widgets', 'pool_id', 'INTEGER DEFAULT 0')
-    _ensure_column(conn, 'tile_tool_pool', 'updated_at', "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-    conn.executescript("""
-    CREATE TABLE IF NOT EXISTS kv_meta (
-        key TEXT PRIMARY KEY,
-        value TEXT DEFAULT ''
-    );
-    """)
-    # v25.9：首次部署时种子标准小工具进公共池（历史手工添加的 iframe 工具在库重建后丢失，
-    # 纳入公共池后所有用户可一键添加，管理员可在"小工具管理"页维护）
-    try:
-        seeded = conn.execute("SELECT value FROM kv_meta WHERE key='tools_pool_seeded'").fetchone()
-        pool_cnt = conn.execute('SELECT COUNT(*) AS c FROM tile_tool_pool').fetchone()['c']
-        if not seeded and pool_cnt == 0:
-            _seed_tools = [
-                ('Zabbix 监控', 'https://zabbix.example.com/', '📊'),
-                ('堡垒机', 'https://oma.risenenergy.com', '🔐'),
-                ('MCP 平台', 'https://mcp.example.com/#/modules', '🤖'),
+        conn = sqlite3.connect()
+        # 验证连接
+        conn.execute('SELECT 1')
+        # 初始化默认板块（若表为空）
+        try:
+            area_count = conn.execute('SELECT COUNT(*) as c FROM responsibility_areas').fetchone()['c']
+            if area_count == 0:
+                for a in ['IT基础设施','网络运维','系统运维','信息安全','数据中心','云运维','终端运维','应用运维']:
+                    try:
+                        conn.execute('INSERT INTO responsibility_areas (name) VALUES (?)', (a,))
+                    except sqlite3.IntegrityError:
+                        pass
+        except Exception:
+            pass
+        # 初始化默认分类
+        existing = conn.execute('SELECT COUNT(*) as c FROM categories').fetchone()['c']
+        if existing == 0:
+            for i, name in enumerate(DEFAULT_CATEGORIES):
+                conn.execute('INSERT INTO categories (name, sort_order) VALUES (?, ?)', (name, i))
+        # v17：基础架构分工 → 成员岗位描述（幂等，只填空值）
+        try:
+            job_map = [
+                ('团队成员', '负责终端桌管（联软）、加密软件、AI 应用开发与 AI 运维。'),
+                ('团队成员', '负责邮件系统、堡垒机、联想网盘、公有云运维及部门杂项。'),
+                ('团队成员', '负责数据中心硬件运维、操作系统运维、虚拟化运维。'),
+                ('团队成员', '负责操作系统、虚拟化、数据库及高级系统运维。'),
+                ('团队成员', '负责终端网络运维、AP 无线运维、园区网络运维、VPN 与跨国线路。'),
+                ('团队成员', '负责数据中心网络、网络架构、广域网、云网络。'),
+                ('团队成员', '负责数据中心网络、网络架构、广域网、云网络。'),
             ]
-            for t, u, i in _seed_tools:
+            for _kw, _desc in job_map:
                 conn.execute(
-                    'INSERT INTO tile_tool_pool (title, kind, url, icon, config, created_by) VALUES (?,?,?,?,?,?)',
-                    (t, 'iframe', u, i, '{"size": "m"}', None)
-                )
-            conn.execute("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('tools_pool_seeded', '1')")
-            # 恢复管理员(user 1)侧边栏丢失的 Zabbix 工具（关联公共池）
-            zrow = conn.execute("SELECT id FROM tile_tool_pool WHERE title='Zabbix 监控'").fetchone()
-            if zrow and conn.execute("SELECT id FROM users WHERE id=1").fetchone():
-                conn.execute(
-                    "INSERT INTO user_widgets (user_id, title, kind, icon, url, config, pool_id) "
-                    "SELECT 1, title, kind, icon, url, config, id FROM tile_tool_pool WHERE id=?",
-                    (zrow['id'],)
-                )
-            conn.commit()
+                    "UPDATE users SET job_description = ? WHERE display_name LIKE '%' || ? || '%' AND (job_description IS NULL OR job_description = '')",
+                    (_desc, _kw))
+        except Exception:
+            pass
+        conn.commit()
+        conn.close()
+        print('[init_db] MySQL connection OK, seed data checked.')
     except Exception as e:
-        print(f'[init_db] seed tile_tool_pool skipped: {e}')
-    conn.executescript("""
-    CREATE TABLE IF NOT EXISTS tile_tool_pool (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        kind TEXT DEFAULT 'iframe',
-        url TEXT DEFAULT '',
-        icon TEXT DEFAULT '',
-        config TEXT DEFAULT '',
-        created_by INTEGER,
-        use_count INTEGER DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE SET NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_tile_tool_pool_title ON tile_tool_pool(title);
-
-    CREATE TABLE IF NOT EXISTS user_tiles (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        pool_type TEXT NOT NULL CHECK(pool_type IN ('link', 'tool')),
-        pool_id INTEGER NOT NULL,
-        title TEXT DEFAULT '',
-        icon TEXT DEFAULT '',
-        url TEXT DEFAULT '',
-        config TEXT DEFAULT '',
-        sort_order INTEGER DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_user_tiles_user ON user_tiles(user_id);
-    """)
-
-    # v25.9：用户活动统计（登录/页面打开/使用时长）
-    conn.executescript("""
-    CREATE TABLE IF NOT EXISTS user_activity (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        action TEXT NOT NULL DEFAULT 'page_view',
-        page TEXT DEFAULT '',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_user_activity_user ON user_activity(user_id);
-    CREATE INDEX IF NOT EXISTS idx_user_activity_time ON user_activity(created_at);
-    """)
-
-    # 初始化默认分类
-    existing = conn.execute('SELECT COUNT(*) as c FROM categories').fetchone()['c']
-    if existing == 0:
-        for i, name in enumerate(DEFAULT_CATEGORIES):
-            conn.execute('INSERT INTO categories (name, sort_order) VALUES (?, ?)', (name, i))
-    # v17：时间字段迁移（幂等，用 PRAGMA user_version 标记）
-    # 历史 created_at 由 CURRENT_TIMESTAMP 写入为 UTC，需 +8 转为本地；completed_at/started_at
-    # 历史为 ISO8601 带 T 微秒格式，统一为空格分隔，保证报告周期字符串比较正确。
-    try:
-        uv = conn.execute('PRAGMA user_version').fetchone()[0] or 0
-        if uv < 17:
-            conn.execute("UPDATE work_items SET created_at = datetime(created_at, '+8 hours') WHERE created_at IS NOT NULL")
-            conn.execute("UPDATE work_items SET completed_at = strftime('%Y-%m-%d %H:%M:%S', completed_at) WHERE completed_at IS NOT NULL")
-            conn.execute("UPDATE work_items SET started_at = strftime('%Y-%m-%d %H:%M:%S', started_at) WHERE started_at IS NOT NULL")
-            conn.execute('PRAGMA user_version = 17')
-    except Exception:
-        pass
-    # v17：基础架构分工 → 成员岗位描述（仅填充空值，不覆盖人工修改）
-    # 注意：display_name 可能带英文前缀（如 'TC Wang-团队成员'），且 '团队成员' 库中为 '团队成员'，
-    # 因此用 LIKE 模糊匹配 + 姓名别名，每次启动执行（幂等，只填空值），不依赖 user_version。
-    try:
-        job_map = [
-            ('团队成员', '负责终端桌管（联软）、加密软件、AI 应用开发与 AI 运维。'),
-            ('团队成员', '负责邮件系统、堡垒机、联想网盘、公有云运维及部门杂项。'),
-            ('团队成员', '负责数据中心硬件运维、操作系统运维、虚拟化运维。'),
-            ('团队成员', '负责操作系统、虚拟化、数据库及高级系统运维。'),
-            ('团队成员', '负责终端网络运维、AP 无线运维、园区网络运维、VPN 与跨国线路。'),
-            ('团队成员', '负责数据中心网络、网络架构、广域网、云网络。'),
-            ('团队成员', '负责数据中心网络、网络架构、广域网、云网络。'),
-        ]
-        for _kw, _desc in job_map:
-            conn.execute(
-                "UPDATE users SET job_description = ? WHERE display_name LIKE '%' || ? || '%' AND (job_description IS NULL OR job_description = '')",
-                (_desc, _kw))
-    except Exception:
-        pass
-    conn.commit()
-    conn.close()
-
+        print(f'[init_db] WARNING: MySQL init failed: {e}')
 
 # ====================================================================
 # 周期任务
@@ -609,15 +197,14 @@ def _mark_daily_sync_done():
 def scheduler_loop():
     while True:
         try:
-            conn = sqlite3.connect(DB_PATH, timeout=15)
-            conn.row_factory = sqlite3.Row
+            conn = sqlite3.connect()
             today = date.today().isoformat()
             # 每日钉钉自动同步（每天 08:00 后触发一次，重启后当天仍可补跑）
             if _daily_sync_due():
                 _mark_daily_sync_done()
                 _daily_dingtalk_sync()
             try:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.execute('START TRANSACTION')
                 templates = conn.execute(
                     "SELECT * FROM work_items WHERE recurring != '' AND next_run_at != '' AND next_run_at <= ?",
                     (today,)
@@ -742,8 +329,8 @@ def api_key_required(f):
         if not api_key:
             return jsonify({'error': '缺少 API Key'}), 401
         key_hash = hashlib.sha256(api_key.encode()).hexdigest()
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
+        conn = sqlite3.connect()
+        conn
         row = conn.execute(
             'SELECT * FROM api_keys WHERE key_hash = ?', (key_hash,)
         ).fetchone()
@@ -793,7 +380,7 @@ def ai_chat(system, user, max_tokens=800, feature='unknown'):
     # 记录 token 消耗
     try:
         uid = session.get('user_id', 0)
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect()
         conn.execute(
             'INSERT INTO ai_usage (user_id, feature, prompt_tokens, completion_tokens, total_tokens, model) VALUES (?, ?, ?, ?, ?, ?)',
             (uid, feature,
@@ -880,7 +467,7 @@ def ai_usage_stats():
         where = 'WHERE user_id = ?'
         params = [session['user_id']]
 
-    total = db.execute(f'SELECT * FROM (SELECT SUM(total_tokens) as t FROM ai_usage {where})', params).fetchone()
+    total = db.execute(f'SELECT * FROM (SELECT SUM(total_tokens) as t FROM ai_usage {where}) AS sub', params).fetchone()
     today_usage = db.execute(
         f"SELECT SUM(total_tokens) as t FROM ai_usage {'WHERE' if where else 'WHERE'} created_at >= ?"
         + (' AND user_id = ?' if not where else ''),
@@ -1304,16 +891,19 @@ def team_member_details(user_id):
         return jsonify({'error': '无权查看'}), 403
 
     today = date.today().isoformat()
+    # v26.4：统计口径与团队概览卡片/个人工作台对齐 —— 本人任务 + 作为协同者的任务
+    collab_like = f'%,{user_id},%'
     items = db.execute("""
         SELECT w.*, u.display_name, u.ad_username, u.section_name
         FROM work_items w JOIN users u ON w.user_id = u.id
-        WHERE w.user_id = ?
+        WHERE w.user_id = ? OR (',' || w.collaborators || ',') LIKE ?
         ORDER BY CASE w.priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 ELSE 3 END,
                  w.created_at DESC
-    """, (user_id,)).fetchall()
+    """, (user_id, collab_like)).fetchall()
 
     total = len(items)
-    pending = sum(1 for i in items if i['status'] != 'completed')
+    # v26.4：待处理只统计 status='pending'，与团队卡片/主区域口径一致（进行中不计入）
+    pending = sum(1 for i in items if i['status'] == 'pending')
     completed = sum(1 for i in items if i['status'] == 'completed')
     overdue = sum(1 for i in items if i['status'] != 'completed' and i['due_date'] and i['due_date'] < today)
 
@@ -1321,16 +911,16 @@ def team_member_details(user_id):
     by_category = db.execute("""
         SELECT category, COUNT(*) as count,
             SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed
-        FROM work_items WHERE user_id = ? GROUP BY category
-    """, (user_id,)).fetchall()
+        FROM work_items WHERE user_id = ? OR (',' || collaborators || ',') LIKE ? GROUP BY category
+    """, (user_id, collab_like)).fetchall()
 
     # 最近7天完成趋势
     week_ago = (date.today() - timedelta(days=7)).isoformat()
     recent_completed = db.execute("""
         SELECT date(completed_at) as day, COUNT(*) as count
-        FROM work_items WHERE user_id = ? AND status = 'completed' AND completed_at >= ?
+        FROM work_items WHERE (user_id = ? OR (',' || collaborators || ',') LIKE ?) AND status = 'completed' AND completed_at >= ?
         GROUP BY date(completed_at) ORDER BY day
-    """, (user_id, week_ago)).fetchall()
+    """, (user_id, collab_like, week_ago)).fetchall()
 
     # 交付物
     deliverables = db.execute("""
@@ -1924,10 +1514,18 @@ def upload_deliverable(item_id):
     if not f.filename:
         return jsonify({'error': '文件名为空'}), 400
 
-    filename = secure_filename(f.filename)
+    # v26.1：支持文件夹上传——relpath 保留相对路径（逐段净化防穿越），
+    # 展示名保留目录结构（dir/sub/file.txt），磁盘存储名拍平为 dir_sub_file.txt
+    rel = (request.form.get('relpath') or '').strip()
+    pretty_name = secure_filename(f.filename)
+    if rel and rel != f.filename:
+        segs = [secure_filename(s) for s in rel.replace('\\', '/').split('/')
+                if s and s not in ('.', '..') and secure_filename(s)]
+        if segs:
+            pretty_name = '/'.join(segs)
     # 避免重名
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    stored_name = f"{ts}_{filename}"
+    stored_name = f"{ts}_{pretty_name.replace('/', '_')}"
     item_dir = os.path.join(UPLOAD_DIR, str(item_id))
     os.makedirs(item_dir, exist_ok=True)
     filepath = os.path.join(item_dir, stored_name)
@@ -1937,12 +1535,12 @@ def upload_deliverable(item_id):
     cur = db.execute("""
         INSERT INTO deliverables (work_item_id, user_id, filename, filepath, filesize, mimetype)
         VALUES (?, ?, ?, ?, ?, ?)
-    """, (item_id, session['user_id'], filename, filepath, filesize,
+    """, (item_id, session['user_id'], pretty_name, filepath, filesize,
           f.mimetype or 'application/octet-stream'))
     db.commit()
     return jsonify({
         'id': cur.lastrowid,
-        'filename': filename,
+        'filename': pretty_name,
         'filesize': filesize,
         'mimetype': f.mimetype or 'application/octet-stream'
     }), 201
@@ -2039,8 +1637,8 @@ def list_milestones(item_id):
 @app.route('/api/work-items/<int:item_id>/milestones', methods=['POST'])
 @login_required
 def add_milestone(item_id):
-    """为工作项登记一个里程碑状态"""
-    item, err = _check_item_access(item_id, require_owner=True)
+    """为工作项登记一个里程碑状态（owner/管理员/协同人员均可）"""
+    item, err = _check_item_access(item_id, require_owner=False)
     if err:
         return err
     data = request.get_json(silent=True) or {}
@@ -2079,6 +1677,16 @@ def delete_milestone(item_id, ms_id):
     db.execute('DELETE FROM work_item_milestones WHERE id = ?', (ms_id,))
     db.commit()
     return jsonify({'message': '已删除'})
+
+
+@app.route('/api/work-items/<int:item_id>')
+@login_required
+def get_work_item(item_id):
+    """获取单个工作项详情"""
+    item, err = _check_item_access(item_id, require_owner=False)
+    if err:
+        return err
+    return jsonify(dict(item))
 
 
 # ====================================================================
@@ -3049,16 +2657,18 @@ def sidebar_stats():
         (uid, week_start)
     ).fetchone()
 
-    # 逾期数
-    overdue = db.execute(
-        "SELECT COUNT(*) as c FROM work_items WHERE user_id = ? AND status != 'completed' AND due_date != '' AND due_date < ?",
-        (uid, today_str)
+    # v25.9 修复：待处理只统计 status='pending'，与主区域 /api/stats 口径一致
+    # 同时纳入协同任务（与 /api/stats 个人视图对齐）
+    collab_like = f'%,{uid},%'
+    pending = db.execute(
+        "SELECT COUNT(*) as c FROM work_items WHERE (user_id=? OR (',' || collaborators || ',') LIKE ?) AND status='pending'",
+        (uid, collab_like)
     ).fetchone()['c']
 
-    # 待处理数
-    pending = db.execute(
-        "SELECT COUNT(*) as c FROM work_items WHERE user_id = ? AND status != 'completed'",
-        (uid,)
+    # 逾期数（同样纳入协同任务）
+    overdue = db.execute(
+        "SELECT COUNT(*) as c FROM work_items WHERE (user_id=? OR (',' || collaborators || ',') LIKE ?) AND status!='completed' AND due_date!='' AND due_date < ?",
+        (uid, collab_like, today_str)
     ).fetchone()['c']
 
     return jsonify({
@@ -3095,6 +2705,18 @@ def _report_materials(db, uid, start, end):
     """, (uid, collab_like, start + ' 00:00:00', end + ' 23:59:59',
           start + ' 00:00:00', end + ' 23:59:59',
           start, end)).fetchall()]
+
+    # v26.4 修复：MySQL 驱动对 timestamp 列返回 datetime 对象，与字符串比较/切片会崩溃，统一规整
+    def _norm_dt(v):
+        if isinstance(v, datetime):
+            return v.strftime('%Y-%m-%d %H:%M:%S')
+        if isinstance(v, date):
+            return v.strftime('%Y-%m-%d')
+        return v
+    for _i in items:
+        for _f in ('created_at', 'completed_at', 'updated_at', 'started_at'):
+            if _i.get(_f) is not None:
+                _i[_f] = _norm_dt(_i[_f])
 
     # v17：子任务完成情况 —— 父任务下所有子任务均完成 → 父任务视为完成
     parent_all_done = {}
@@ -3734,6 +3356,21 @@ def stats():
                 'last_visit': last_visit
             }
 
+        # v26.5：附加每员工 Token 消耗（今日/本月）与 MCP 接入情况
+        month_start = date.today().replace(day=1).isoformat()
+        token_stats = {r['user_id']: r for r in db.execute("""
+            SELECT user_id,
+                SUM(CASE WHEN DATE(created_at)=? THEN total_tokens ELSE 0 END) as today_tokens,
+                SUM(CASE WHEN DATE(created_at)>=? THEN total_tokens ELSE 0 END) as month_tokens
+            FROM ai_usage GROUP BY user_id
+        """, (today, month_start)).fetchall()}
+        for _uk, _tr in token_stats.items():
+            _tr['today_tokens'] = int(_tr['today_tokens'] or 0)
+            _tr['month_tokens'] = int(_tr['month_tokens'] or 0)
+        mcp_stats = {r['user_id']: r for r in db.execute(
+            "SELECT user_id, COUNT(*) as cnt, MAX(last_used_at) as last_used FROM mcp_tokens WHERE enabled=1 GROUP BY user_id"
+        ).fetchall()}
+
         # v25.9：附加钉钉绑定状态
         bound_rows = db.execute('SELECT user_id FROM dingtalk_bindings').fetchall()
         bound_ids = set(r['user_id'] for r in bound_rows)
@@ -3741,8 +3378,17 @@ def stats():
         user_stats_list = []
         for u in user_stats:
             d = dict(u)
+            # v26.4：SUM 经 shim 返回字符串，统一转 int（与详情接口类型一致）
+            for k in ('total', 'completed', 'pending', 'in_progress', 'overdue'):
+                d[k] = int(d.get(k) or 0)
             d['activity'] = activity_stats.get(u['id'], {})
             d['dingtalk_bound'] = u['id'] in bound_ids
+            _ts = token_stats.get(u['id']) or {}
+            d['today_tokens'] = _ts.get('today_tokens', 0)
+            d['month_tokens'] = _ts.get('month_tokens', 0)
+            _ms = mcp_stats.get(u['id'])
+            d['mcp_count'] = int(_ms['cnt']) if _ms else 0
+            d['mcp_last_used'] = (_ms.get('last_used') or '') if _ms else ''
             user_stats_list.append(d)
 
         return jsonify({
@@ -3873,8 +3519,7 @@ def ext_add_work_item():
     uid = g.api_user_id
     source = data.get('source', 'external')
 
-    db = sqlite3.connect(DB_PATH)
-    db.row_factory = sqlite3.Row
+    db = sqlite3.connect()
     recurring = data.get('recurring', '')
     if recurring not in RECURRING_TYPES:
         recurring = ''
@@ -3917,8 +3562,7 @@ def ext_update_work_item(item_id):
     """外部 API：更新工作项状态"""
     data = request.get_json(silent=True) or {}
     uid = g.api_user_id
-    db = sqlite3.connect(DB_PATH)
-    db.row_factory = sqlite3.Row
+    db = sqlite3.connect()
     item = db.execute('SELECT * FROM work_items WHERE id = ?', (item_id,)).fetchone()
     if not item:
         db.close()
@@ -3959,8 +3603,7 @@ def ext_update_work_item(item_id):
 def ext_stats():
     """外部 API：获取统计"""
     uid = g.api_user_id
-    db = sqlite3.connect(DB_PATH)
-    db.row_factory = sqlite3.Row
+    db = sqlite3.connect()
     today = date.today().isoformat()
     total = db.execute('SELECT COUNT(*) as c FROM work_items WHERE user_id=?', (uid,)).fetchone()['c']
     completed = db.execute("SELECT COUNT(*) as c FROM work_items WHERE user_id=? AND status='completed'", (uid,)).fetchone()['c']
@@ -3977,8 +3620,7 @@ def ext_stats():
 @api_key_required
 def ext_whoami():
     """外部 API：验证 API Key 并返回用户信息"""
-    db = sqlite3.connect(DB_PATH)
-    db.row_factory = sqlite3.Row
+    db = sqlite3.connect()
     user = db.execute('SELECT id, ad_username, display_name, section_name FROM users WHERE id = ?', (g.api_user_id,)).fetchone()
     db.close()
     return jsonify(dict(user) if user else {'error': 'not found'})
@@ -3990,7 +3632,7 @@ def ext_whoami():
 # ====================================================================
 
 MCP_SERVER_NAME = os.environ.get('MCP_SERVER_NAME', 'infra-workbench-mcp')
-MCP_SERVER_VERSION = os.environ.get('MCP_SERVER_VERSION', '1.0.0')
+MCP_SERVER_VERSION = os.environ.get('MCP_SERVER_VERSION', '26.3.0')
 
 
 def _mcp_auth_token():
@@ -4011,8 +3653,7 @@ def _mcp_verify_token(token_hash):
     """
     if not token_hash:
         return None
-    db = sqlite3.connect(DB_PATH)
-    db.row_factory = sqlite3.Row
+    db = sqlite3.connect()
     digest = hashlib.sha256(token_hash.encode()).hexdigest()
     row = db.execute(
         'SELECT id, user_id FROM mcp_tokens WHERE auth_token_hash = ? AND enabled = 1', (digest,)
@@ -4521,8 +4162,7 @@ def _mcp_call_tool(user_id, tool_name, args, token_prefix=''):
     token_prefix：发起请求的 MCP Token 前 8 位（每用户唯一），写入任务的 mcp_token_prefix 列，
     用于追溯"谁通过哪个工具创建了这条工作事项"。
     """
-    db = sqlite3.connect(DB_PATH)
-    db.row_factory = sqlite3.Row
+    db = sqlite3.connect()
     today = date.today().isoformat()
     try:
         if tool_name == 'list_work_items':
@@ -4674,12 +4314,92 @@ def _mcp_call_tool(user_id, tool_name, args, token_prefix=''):
         db.close()
 
 
+# ---- v26.0：MCP 会话通道（跨 gunicorn worker，基于 /app/data/mcp_sessions 文件系统） ----
+def _mcp_sessions_root():
+    d = os.environ.get('MCP_SESSIONS_ROOT', '/app/data/mcp_sessions')
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _mcp_session_create():
+    """创建新会话目录；顺带清理 1 小时以上的残留会话"""
+    root = _mcp_sessions_root()
+    now = time.time()
+    try:
+        for name in os.listdir(root):
+            p = os.path.join(root, name)
+            try:
+                if os.path.isdir(p) and now - os.path.getmtime(p) > 3600:
+                    import shutil as _sh
+                    _sh.rmtree(p, ignore_errors=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    sid = uuid.uuid4().hex[:16]
+    sdir = os.path.join(root, sid)
+    os.makedirs(sdir, exist_ok=True)
+    return sid, sdir
+
+
+def _mcp_session_dir(sid):
+    """校验会话 ID 并返回目录（不存在返回 None）；sid 仅允许十六进制，防路径穿越"""
+    if not sid or not re.fullmatch(r'[0-9a-f]{16}', sid):
+        return None
+    d = os.path.join(_mcp_sessions_root(), sid)
+    return d if os.path.isdir(d) else None
+
+
+def _mcp_session_push(sid, payload):
+    """向会话通道写入一条待下发消息（原子写：tmp -> rename）"""
+    d = _mcp_session_dir(sid)
+    if not d:
+        return False
+    try:
+        seq = time.time_ns()
+        tmp = os.path.join(d, str(seq) + '.tmp')
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(tmp, os.path.join(d, str(seq) + '.json'))
+        return True
+    except Exception as e:
+        print('[mcp] 会话推送失败 sid=%s: %s' % (sid, e))
+        return False
+
+
+def _mcp_session_drain(sdir):
+    """取走并删除会话目录内全部待下发消息（按写入顺序）"""
+    out = []
+    try:
+        for fn in sorted(os.listdir(sdir)):
+            if not fn.endswith('.json'):
+                continue
+            p = os.path.join(sdir, fn)
+            try:
+                with open(p, encoding='utf-8') as f:
+                    out.append(json.load(f))
+                os.remove(p)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return out
+
+
 def _handle_mcp_jsonrpc(uid):
     """处理 MCP JSON-RPC 请求（initialize / tools/list / tools/call）"""
     req = request.get_json(force=True, silent=True) or {}
     req_id = req.get('id')
     method = req.get('method', '')
     params = req.get('params', {})
+
+    # v26.0：JSON-RPC 通知（无 id，如 notifications/initialized）不产生响应，
+    # 由调用方直接回 202；修复此前返回 -32601 导致标准客户端握手中断的问题
+    if req_id is None:
+        return None
+
+    if method == 'ping':
+        return jsonify({'jsonrpc': '2.0', 'id': req_id, 'result': {}})
 
     if method == 'initialize':
         return jsonify({
@@ -4724,16 +4444,37 @@ def mcp_sse():
         if request.data and request.data.strip():
             ct = (request.headers.get('Content-Type') or '').lower()
             if 'json' in ct or request.data[:1] in (b'{', b'['):
-                return _handle_mcp_jsonrpc(uid)
+                r = _handle_mcp_jsonrpc(uid)
+                if r is None:
+                    return '', 202
+                return r
 
+    # v26.0：标准 SSE transport —— 每个连接独立会话，POST 的 JSON-RPC 响应
+    # 经由本事件流以 event: message 下发（QoderWork 等标准客户端依赖此通道），
+    # 跨 gunicorn worker 通过 /app/data/mcp_sessions 文件通道中转
+    sid, sdir = _mcp_session_create()
     base = request.host_url.rstrip('/')
-    endpoint = f'{base}/mcp/message?token={token}'
+    endpoint = f'{base}/mcp/message?token={token}&sessionId={sid}'
 
     def generate():
-        yield f'event: endpoint\ndata: {endpoint}\n\n'
-        while True:
-            time.sleep(20)
-            yield ': keepalive\n\n'
+        import shutil as _sh
+        try:
+            yield f'event: endpoint\ndata: {endpoint}\n\n'
+            idle = 0.0
+            while True:
+                msgs = _mcp_session_drain(sdir)
+                if msgs:
+                    idle = 0.0
+                    for m in msgs:
+                        yield 'event: message\ndata: ' + json.dumps(m, ensure_ascii=False) + '\n\n'
+                else:
+                    time.sleep(0.3)
+                    idle += 0.3
+                    if idle >= 20:
+                        idle = 0.0
+                        yield ': keepalive\n\n'
+        finally:
+            _sh.rmtree(sdir, ignore_errors=True)
 
     return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
@@ -4741,12 +4482,25 @@ def mcp_sse():
 
 @app.route('/mcp/message', methods=['POST'])
 def mcp_message():
-    """MCP JSON-RPC 消息处理端点"""
+    """MCP JSON-RPC 消息处理端点（v26.0：标准 SSE transport 双通道兼容）
+
+    - 带 sessionId：响应推送至对应 SSE 会话通道（标准客户端收 event: message），
+      HTTP 回 202 并附带响应体（简化版客户端仍可直接读 body，双向兼容）
+    - 不带 sessionId：沿用旧行为，响应直接放 HTTP body（200）
+    - 通知（无 id）：202 无响应体
+    """
     token = _mcp_auth_token()
     uid = _mcp_verify_token(token)
     if not uid:
         return jsonify({'jsonrpc': '2.0', 'error': {'code': -32001, 'message': 'Unauthorized'}, 'id': None}), 401
-    return _handle_mcp_jsonrpc(uid)
+    resp = _handle_mcp_jsonrpc(uid)
+    if resp is None:
+        return '', 202
+    body = resp.get_data(as_text=True)
+    sid = request.args.get('sessionId', '')
+    if sid and _mcp_session_push(sid, json.loads(body)):
+        return Response(body, status=202, mimetype='application/json')
+    return Response(body, status=200, mimetype='application/json')
 
 
 # ====================================================================
@@ -4992,7 +4746,7 @@ def _auto_bind_if_authed(user_id):
     row = db.execute('SELECT union_id FROM dingtalk_bindings WHERE user_id = ?', (user_id,)).fetchone()
     if row and row['union_id'] == dus:
         return dus
-    db.execute('''INSERT OR REPLACE INTO dingtalk_bindings
+    db.execute('''REPLACE INTO dingtalk_bindings
         (user_id, union_id, access_token, refresh_token, expires_at, updated_at)
         VALUES (?, ?, '', '', '', ?)''',
         (user_id, dus, datetime.now().isoformat()))
@@ -5006,15 +4760,15 @@ def _save_knowledge(user_id, source, external_id, title, content, raw=None, even
     occur_date: 发生日期 YYYY-MM-DD（冗余便于查询）
     conversation_type: 聊天记录会话类型（p2p 单聊 / group 群聊）
     """
-    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn = sqlite3.connect()
     try:
         conn.execute("""
             INSERT INTO user_knowledge (user_id, source, title, content, raw_data, external_id, created_at, event_time, occur_date, conversation_type)
             VALUES (?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(user_id, source, external_id) DO UPDATE SET
-                title = excluded.title, content = excluded.content, raw_data = excluded.raw_data,
-                event_time = excluded.event_time, occur_date = excluded.occur_date,
-                conversation_type = excluded.conversation_type
+            ON DUPLICATE KEY UPDATE
+                title = VALUES(title), content = VALUES(content), raw_data = VALUES(raw_data),
+                event_time = VALUES(event_time), occur_date = VALUES(occur_date),
+                conversation_type = VALUES(conversation_type)
         """, (user_id, source, title, content,
               json.dumps(raw, ensure_ascii=False) if raw else None,
               external_id, datetime.now().isoformat(), event_time, occur_date, conversation_type))
@@ -5069,7 +4823,7 @@ def _filter_chat_records(chat_rows, user_id, db=None):
             my_name = (row['display_name'] or '').strip()
     filtered = []
     for r in chat_rows:
-        if isinstance(r, sqlite3.Row):
+        if isinstance(r, dict):
             r = dict(r)
         is_group = _is_group_chat_from_row(r)
         if not is_group:
@@ -5168,7 +4922,7 @@ def _sync_dt_todo(user_id, full=False):
     if full:
         all_tids = [str(t.get('taskId') or t.get('id') or '') for t in all_items if (t.get('taskId') or t.get('id'))]
         try:
-            conn = sqlite3.connect(DB_PATH)
+            conn = sqlite3.connect()
             if all_tids:
                 placeholders = ','.join('?' * len(all_tids))
                 conn.execute(
@@ -5229,7 +4983,7 @@ def _sync_dt_calendar(user_id, full=False):
     if full:
         all_eids = [str(evt.get('id') or evt.get('eventId') or '') for evt in items if (evt.get('id') or evt.get('eventId'))]
         try:
-            conn = sqlite3.connect(DB_PATH)
+            conn = sqlite3.connect()
             if all_eids:
                 placeholders = ','.join('?' * len(all_eids))
                 conn.execute(
@@ -5318,7 +5072,7 @@ def _sync_dt_chat(user_id, full=False):
                 break
             args = ['chat', 'message', 'list', '--group', cid, '--time', since, '--direction', 'newer', '--limit', str(per_conv), '-y']
             if cursor:
-                args.extend(['--cursor', cursor])
+                args.extend(['--cursor', str(cursor)])
             mout = _dws_command(user_id, args)
             msgs = []
             if isinstance(mout, list):
@@ -5422,7 +5176,7 @@ def _user_sync_lock(user_id):
 
 def _set_sync_status(user_id, status):
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=15)
+        conn = sqlite3.connect()
         conn.execute("UPDATE dingtalk_bindings SET sync_status = ? WHERE user_id = ?",
                      (status, user_id))
         conn.commit()
@@ -5445,7 +5199,7 @@ def _bg_full_sync(user_id, types):
         detail = '；'.join(f'{k}:{counts.get(k, 0)}' for k in counts)
         _set_sync_status(user_id, f'ok|{datetime.now().strftime("%Y-%m-%d %H:%M")}|{total} 条({detail})')
         try:
-            conn = sqlite3.connect(DB_PATH, timeout=15)
+            conn = sqlite3.connect()
             conn.execute('UPDATE dingtalk_bindings SET full_synced_at = ?, updated_at = ? WHERE user_id = ?',
                          (datetime.now().isoformat(), datetime.now().isoformat(), user_id))
             conn.commit()
@@ -5476,8 +5230,8 @@ def _daily_dingtalk_sync():
         'detail': ''
     }
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=15)
-        conn.row_factory = sqlite3.Row
+        conn = sqlite3.connect()
+        conn
         users = conn.execute('SELECT user_id FROM dingtalk_bindings').fetchall()
         conn.close()
         log['user_count'] = len(users)
@@ -5506,15 +5260,15 @@ def _daily_dingtalk_sync():
         print(f'[daily-sync] 异常: {e}')
     finally:
         try:
-            conn = sqlite3.connect(DB_PATH, timeout=15)
+            conn = sqlite3.connect()
             conn.execute("""
                 INSERT INTO dingtalk_sync_log (sync_date, sync_at, user_count, chat_count, todo_count, calendar_count, minutes_count, status, detail)
                 VALUES (?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(sync_date) DO UPDATE SET
-                    sync_at=excluded.sync_at, user_count=excluded.user_count,
-                    chat_count=excluded.chat_count, todo_count=excluded.todo_count,
-                    calendar_count=excluded.calendar_count, minutes_count=excluded.minutes_count,
-                    status=excluded.status, detail=excluded.detail
+                ON DUPLICATE KEY UPDATE
+                    sync_at=VALUES(sync_at), user_count=VALUES(user_count),
+                    chat_count=VALUES(chat_count), todo_count=VALUES(todo_count),
+                    calendar_count=VALUES(calendar_count), minutes_count=VALUES(minutes_count),
+                    status=VALUES(status), detail=VALUES(detail)
             """, (log['sync_date'], log['sync_at'], log['user_count'], log['chat_count'],
                   log['todo_count'], log['calendar_count'], log['minutes_count'], log['status'], log['detail']))
             conn.commit()
@@ -5642,7 +5396,7 @@ def dingtalk_bind():
     if detected != union_id:
         return jsonify({'error': f'unionId 不匹配。dws 检测到的 unionId 为 {detected}，请填写正确的 unionId'}), 400
     db = get_db()
-    db.execute('''INSERT OR REPLACE INTO dingtalk_bindings
+    db.execute('''REPLACE INTO dingtalk_bindings
         (user_id, union_id, access_token, refresh_token, expires_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?)''',
         (session['user_id'], union_id, '', '', '', datetime.now().isoformat()))
