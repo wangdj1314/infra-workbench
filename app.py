@@ -243,6 +243,19 @@ def init_db():
                 "UPDATE users SET ad_username = 'zhengxy3', email = 'zhengxy3@example.com' WHERE ad_username = 'zhengxy' AND team_id = (SELECT id FROM teams WHERE name = '信息安全团队')")
         except Exception:
             pass
+        # v28.4：信息安全团队默认板块（幂等）
+        try:
+            sec_team = conn.execute("SELECT id FROM teams WHERE name = '信息安全团队'").fetchone()
+            if sec_team:
+                _sec_id = sec_team['id']
+                for _a in ['安全运营监控', '漏洞管理', '渗透测试', '等保合规', '应急响应',
+                           '防火墙与安全设备运维', '数据安全', '邮件与终端安全']:
+                    try:
+                        conn.execute('INSERT INTO responsibility_areas (name, team_id) VALUES (?, ?)', (_a, _sec_id))
+                    except Exception:
+                        pass  # 已存在
+        except Exception:
+            pass
         conn.commit()
         conn.close()
         print('[init_db] MySQL connection OK, seed data checked.')
@@ -1571,6 +1584,14 @@ def list_work_items():
     elif session.get('is_admin') and user_filter:
         query += ' AND w.user_id = ?'
         params.append(user_filter)
+    elif session.get('is_admin') and request.args.get('team_id'):
+        # v28.4：工作内容管理按团队筛选
+        team_filter = int(request.args.get('team_id'))
+        scope_team_id = get_admin_scope()
+        if scope_team_id and team_filter != scope_team_id:
+            team_filter = scope_team_id  # 子管理员强制本团队
+        query += ' AND w.user_id IN (SELECT id FROM users WHERE team_id = ?)'
+        params.append(team_filter)
     elif session.get('is_admin') and get_admin_scope():
         # v28.1：子管理员无指定用户时，只看自己团队成员的工作项
         scope_team_id = get_admin_scope()
