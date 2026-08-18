@@ -2,6 +2,13 @@
 
 版本规则：主版本号跟随年份迭代（v25.x → v26.0），功能变更在本文件登记。
 
+## v28.7（2026-08-18）
+
+### 修复：思考型模型（Qwen3.8-27B）生成报错
+- **根因**：思考型模型思考链耗尽 `max_tokens` 时接口返回 `content=null`（finish_reason=length），`ai_chat` 直接 `.strip()` 抛 `'NoneType' object has no attribute 'strip'`
+- **修复**：content 为空且思考耗尽时自动加倍 `max_tokens` 重试一次（上限 6000）；仍为空则返回明确错误提示
+- **附带**：`api_key` 为 `none`（字面量）时不再发送 Authorization 头
+
 ## v28.6（2026-08-18）
 
 ### 新增：AD 字段同步 + 团队概览岗位/工号展示

@@ -494,27 +494,43 @@ def ai_chat(system, user, max_tokens=800, feature='unknown', provider=None):
     model = provider['model'] if provider else AI_MODEL
     api_key = (provider.get('api_key', '') if provider else '')
     headers = {'Content-Type': 'application/json'}
-    if api_key:
+    if api_key and str(api_key).lower() != 'none':
         headers['Authorization'] = f'Bearer {api_key}'
-    resp = requests.post(
-        f'{base_url}/chat/completions',
-        headers=headers,
-        json={
-            'model': model,
-            'messages': [
-                {'role': 'system', 'content': system},
-                {'role': 'user', 'content': user}
-            ],
-            'temperature': 0.3,
-            'max_tokens': max_tokens,
-            'stream': False
-        },
-        timeout=180
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    content = data['choices'][0]['message']['content'].strip()
-    usage = data.get('usage', {})
+
+    def _post(mt):
+        r = requests.post(
+            f'{base_url}/chat/completions',
+            headers=headers,
+            json={
+                'model': model,
+                'messages': [
+                    {'role': 'system', 'content': system},
+                    {'role': 'user', 'content': user}
+                ],
+                'temperature': 0.3,
+                'max_tokens': mt,
+                'stream': False
+            },
+            timeout=180
+        )
+        r.raise_for_status()
+        d = r.json()
+        ch = (d.get('choices') or [{}])[0]
+        m = ch.get('message') or {}
+        return (
+            (m.get('content') or '').strip(),
+            ch.get('finish_reason'),
+            (m.get('reasoning_content') or '').strip(),
+            d.get('usage') or {}
+        )
+
+    content, finish, reasoning, usage = _post(max_tokens)
+    # v28.7：思考型模型（如 Qwen3.8）思考链耗尽 max_tokens 时 content 为空，加倍重试一次
+    if not content and reasoning and finish == 'length' and max_tokens < 4000:
+        content, finish, reasoning, usage = _post(min(max_tokens * 2, 6000))
+    if not content:
+        raise ValueError('AI 返回空内容（思考型模型 token 不足或响应异常），请重试或切换模型')
+
     # 记录 token 消耗
     try:
         uid = session.get('user_id', 0)
