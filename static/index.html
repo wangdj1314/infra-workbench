@@ -611,7 +611,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="login-card">
     <div class="login-logo">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <h1>基础架构工作台 <span class="version-badge">v28.2</span></h1>
+      <h1>基础架构工作台 <span class="version-badge">v28.3</span></h1>
       <p>Infrastructure Team Workbench</p>
     </div>
     <div id="loginError" class="login-error hidden"></div>
@@ -636,7 +636,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="topbar">
     <div class="topbar-left">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" style="width:22px;height:22px"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v28.2">v28.2</span>
+      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v28.3">v28.3</span>
     </div>
     <div class="topbar-right">
       <div class="ai-token-badge" onclick="switchTab('apikey')" title="AI Token 消耗">
@@ -779,27 +779,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
 
         <!-- Members Tab -->
         <div id="tab-members" class="hidden">
-          <!-- 基础架构板块（全局管理员可见：无team_id的用户 + team_id=NULL的板块） -->
-          <div id="membersInfraSection">
-            <div class="section-header">
-              <h2>基础架构团队</h2>
-              <button class="btn btn-primary-sm" onclick="showAddMemberModal(null)">+ 添加成员</button>
-            </div>
-            <table class="team-table">
-              <thead>
-                <tr><th>AD 账号</th><th>姓名</th><th>工号</th><th>邮箱</th><th>负责板块</th><th>岗位描述</th><th>工作项</th><th>待处理</th><th>逾期</th><th>操作</th></tr>
-              </thead>
-              <tbody id="membersInfraBody"></tbody>
-            </table>
-            <div class="section-header" style="margin-top:16px">
-              <h2 style="font-size:15px">基础架构 · 负责板块</h2>
-              <button class="btn btn-primary-sm" onclick="showAddAreaModal(null)">+ 添加板块</button>
-            </div>
-            <div id="areaInfraPanel" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px">
-              <p class="ai-hint">加载中...</p>
-            </div>
-          </div>
-          <!-- 各团队板块（动态渲染，每个团队一个section） -->
+          <!-- v28.3：全部团队分栏动态渲染（含基础架构团队），不再有写死的默认区 -->
           <div id="membersTeamSections"></div>
         </div>
 
@@ -3639,7 +3619,7 @@ function _memberRowHtml(u) {
   const respTags = (u.responsibilities || '').split(',').filter(s=>s).map(s=>`<span class="tag-sm" style="display:inline-block;background:var(--primary-light);color:var(--primary);padding:1px 6px;border-radius:4px;font-size:11px;margin-right:4px">${escapeHtml(s)}</span>`).join('');
   return `<tr>
     <td>${escapeHtml(u.ad_username)}</td>
-    <td>${escapeHtml(u.display_name)} ${u.is_admin?'<span class="badge-admin" style="margin-left:4px">管理员</span>':''}</td>
+    <td>${escapeHtml(u.display_name)} ${u.is_super?'<span class="badge-admin" style="margin-left:4px;background:linear-gradient(135deg,#f59e0b,#ef4444)">主管理员</span>':(u.is_admin?'<span class="badge-admin" style="margin-left:4px">子管理员</span>':'')}</td>
     <td>${escapeHtml(u.employee_id||'-')}</td>
     <td>${escapeHtml(u.email||'-')}</td>
     <td>${respTags || '-'}</td>
@@ -3682,24 +3662,12 @@ async function loadMembers() {
       sel.value = cur;
     }
 
-    const isSubAdmin = currentUser && currentUser.team_id;
+    const isSubAdmin = currentUser && currentUser.team_id && !currentUser.is_super;
 
-    // 基础架构区：team_id 为 null 的用户（仅全局管理员可见）
-    const infraSection = document.getElementById('membersInfraSection');
-    if (infraSection) {
-      if (isSubAdmin) {
-        infraSection.style.display = 'none';
-      } else {
-        infraSection.style.display = '';
-        const infraUsers = users.filter(u => !u.team_id);
-        _renderMembersToEl(infraUsers, 'membersInfraBody');
-      }
-    }
-
-    // 各团队区：按 team_id 分组
+    // v28.3：全部团队动态分栏（基础架构团队也在 teams 表中，不再有写死的默认区）
     const teamBox = document.getElementById('membersTeamSections');
     if (!teamBox) return;
-    teamBox.innerHTML = teams.map(t => {
+    let sectionsHtml = teams.map(t => {
       const tUsers = users.filter(u => u.team_id === t.id);
       return `<div style="margin-top:24px">
         <div class="section-header">
@@ -3719,11 +3687,25 @@ async function loadMembers() {
         </div>
       </div>`;
     }).join('');
+    // 兜底：未分配团队的用户（正常应为空）
+    const unassigned = isSubAdmin ? [] : users.filter(u => !u.team_id);
+    if (unassigned.length) {
+      sectionsHtml += `<div style="margin-top:24px">
+        <div class="section-header">
+          <h2 style="color:var(--muted)">未分配团队</h2>
+        </div>
+        <table class="team-table">
+          <thead><tr><th>AD 账号</th><th>姓名</th><th>工号</th><th>邮箱</th><th>负责板块</th><th>岗位描述</th><th>工作项</th><th>待处理</th><th>逾期</th><th>操作</th></tr></thead>
+          <tbody>${unassigned.map(_memberRowHtml).join('')}</tbody>
+        </table>
+      </div>`;
+    }
+    teamBox.innerHTML = sectionsHtml;
     // 团队section已创建，渲染各团队的板块面板
     renderAllAreaPanels();
   } catch(err) {
-    const infraBody = document.getElementById('membersInfraBody');
-    if (infraBody) infraBody.innerHTML = `<tr><td colspan="10" style="text-align:center;padding:40px;color:var(--danger)">${err.message}</td></tr>`;
+    const teamBox = document.getElementById('membersTeamSections');
+    if (teamBox) teamBox.innerHTML = `<p style="text-align:center;padding:40px;color:var(--danger)">${err.message}</p>`;
   }
 }
 
@@ -3847,19 +3829,8 @@ function _renderAreaList(areas, elId) {
 }
 
 function renderAllAreaPanels() {
-  const isSubAdmin = currentUser && currentUser.team_id;
-  // 基础架构面板（team_id=NULL 的板块，仅全局管理员可见）
-  const infraPanel = document.getElementById('areaInfraPanel');
-  if (infraPanel) {
-    if (isSubAdmin) {
-      document.getElementById('membersInfraSection')?.querySelector('.section-header:last-of-type')?.setAttribute('style','display:none');
-      infraPanel.parentElement.style.display = 'none';
-    } else {
-      const infraAreas = areaCache.filter(a => !a.team_id);
-      _renderAreaList(infraAreas, 'areaInfraPanel');
-    }
-  }
-  // 各团队面板
+  const isSubAdmin = currentUser && currentUser.team_id && !currentUser.is_super;
+  // v28.3：全部按团队渲染（team_id=NULL 的旧板块已由 init_db 迁移到基础架构团队）
   teamsCache.forEach(t => {
     const teamAreas = areaCache.filter(a => a.team_id === t.id);
     _renderAreaList(teamAreas, `areaTeam${t.id}Panel`);
@@ -5253,16 +5224,24 @@ function renderOrgTeams() {
   box.innerHTML = _orgTeams.map(t => {
     const members = t.members || [];
     const memberRows = members.map(m => {
-      const roleBadge = m.is_admin ? '<span class="badge" style="background:#f59e0b;color:#fff;font-size:10px;padding:2px 6px;margin-left:6px">子管理员</span>' : '';
-      const removeBtn = `<button class="btn btn-sm" style="padding:2px 8px;font-size:11px" onclick="orgRemoveMember(${t.id},${m.id})">移除</button>`;
-      const toggleBtn = m.is_admin
-        ? `<button class="btn btn-sm" style="padding:2px 8px;font-size:11px" onclick="orgToggleAdmin(${t.id},${m.id},false)">降级为成员</button>`
-        : `<button class="btn btn-sm" style="padding:2px 8px;font-size:11px" onclick="orgToggleAdmin(${t.id},${m.id},true)">设为子管理员</button>`;
+      const isSuper = !!m.is_super;
+      const roleBadge = isSuper
+        ? '<span class="badge" style="background:linear-gradient(135deg,#f59e0b,#ef4444);color:#fff;font-size:10px;padding:2px 6px;margin-left:6px">主管理员</span>'
+        : (m.is_admin ? '<span class="badge" style="background:#f59e0b;color:#fff;font-size:10px;padding:2px 6px;margin-left:6px">子管理员</span>' : '');
+      const opsHtml = isSuper
+        ? '<span style="color:var(--text-muted);font-size:11px">主管理员 · 角色固定</span>'
+        : (() => {
+            const removeBtn = `<button class="btn btn-sm" style="padding:2px 8px;font-size:11px" onclick="orgRemoveMember(${t.id},${m.id})">移除</button>`;
+            const toggleBtn = m.is_admin
+              ? `<button class="btn btn-sm" style="padding:2px 8px;font-size:11px" onclick="orgToggleAdmin(${t.id},${m.id},false)">降级为成员</button>`
+              : `<button class="btn btn-sm" style="padding:2px 8px;font-size:11px" onclick="orgToggleAdmin(${t.id},${m.id},true)">设为子管理员</button>`;
+            return `${toggleBtn} ${removeBtn}`;
+          })();
       return `<tr>
         <td>${escapeHtml(m.display_name)}${roleBadge}</td>
         <td>${escapeHtml(m.ad_username)}</td>
         <td>${escapeHtml(m.section_name || '')}</td>
-        <td style="white-space:nowrap">${toggleBtn} ${removeBtn}</td>
+        <td style="white-space:nowrap">${opsHtml}</td>
       </tr>`;
     }).join('');
     return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden">

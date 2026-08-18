@@ -209,6 +209,30 @@ def init_db():
                         (infra_id, _nm, infra_id))
         except Exception:
             pass
+        # v28.3：主管理员标志（is_super=1 表示全局主管理员，可同时属于某团队）
+        try:
+            conn.execute('ALTER TABLE users ADD COLUMN is_super INTEGER DEFAULT 0')
+        except Exception:
+            pass  # 列已存在
+        try:
+            _infra = conn.execute("SELECT id FROM teams WHERE name = '基础架构团队'").fetchone()
+            if _infra:
+                # wangdj = 主管理员 + 基础架构团队成员（双角色）
+                conn.execute(
+                    "UPDATE users SET is_super = 1, is_admin = 1, team_id = ? WHERE ad_username = 'wangdj'",
+                    (_infra['id'],))
+                # 旧板块（team_id=NULL）全部归入基础架构团队
+                conn.execute(
+                    'UPDATE responsibility_areas SET team_id = ? WHERE team_id IS NULL',
+                    (_infra['id'],))
+        except Exception:
+            pass
+        # v28.3：修正团队成员域账号 chenx → chenxin6
+        try:
+            conn.execute(
+                "UPDATE users SET ad_username = 'chenxin6' WHERE display_name = '团队成员' AND ad_username = 'chenx'")
+        except Exception:
+            pass
         conn.commit()
         conn.close()
         print('[init_db] MySQL connection OK, seed data checked.')
@@ -391,12 +415,15 @@ def admin_required(f):
 
 
 def get_admin_scope():
-    """v28.1：返回当前管理员的团队作用域。
+    """v28.3：返回当前管理员的团队作用域。
+    - 主管理员（is_super=1）→ 返回 None，无论是否属于某团队，均为全局权限
     - 全局管理员（team_id=None）→ 返回 None，表示可看所有
     - 团队子管理员（team_id=X）→ 返回 X，表示只能看该团队
     """
     if not session.get('is_admin'):
         return None
+    if session.get('is_super'):
+        return None  # v28.3：主管理员始终全局
     return session.get('team_id')  # None = 全局管理员, int = 团队子管理员
 
 
@@ -768,11 +795,12 @@ def login():
         session['user_id'] = user['id']
         session['ad_username'] = user['ad_username']
         session['is_admin'] = bool(user['is_admin'])
+        session['is_super'] = bool(dict(user).get('is_super', 0))
         session['team_id'] = user['team_id']
         session['display_name'] = display_name or user['display_name']
     elif username == ADMIN_USERNAME.lower():
         db.execute(
-            'INSERT INTO users (ad_username, display_name, is_admin) VALUES (?, ?, 1)',
+            'INSERT INTO users (ad_username, display_name, is_admin, is_super) VALUES (?, ?, 1, 1)',
             (username, display_name or username)
         )
         db.commit()
@@ -781,6 +809,7 @@ def login():
         session['user_id'] = user['id']
         session['ad_username'] = username
         session['is_admin'] = True
+        session['is_super'] = True  # ADMIN_USERNAME 首次创建即为主管理员
         session['team_id'] = user.get('team_id')  # 全局管理员通常为 None
         session['display_name'] = display_name or username
     else:
@@ -791,6 +820,7 @@ def login():
         'username': session['ad_username'],
         'display_name': session['display_name'],
         'is_admin': session['is_admin'],
+        'is_super': session.get('is_super', False),
         'team_id': session.get('team_id')
     })
 
@@ -809,6 +839,7 @@ def me():
         'username': session['ad_username'],
         'display_name': session['display_name'],
         'is_admin': session.get('is_admin', False),
+        'is_super': session.get('is_super', False),
         'team_id': session.get('team_id')
     })
 
@@ -847,6 +878,7 @@ def list_users():
             'employee_id': u['employee_id'] or '',
             'email': u['email'] or '',
             'is_admin': bool(u['is_admin']),
+            'is_super': bool(dict(u).get('is_super', 0)),
             'team_id': u['team_id'],
             'job_description': dict(u).get('job_description') or '',
             'responsibilities': dict(u).get('responsibilities') or '',
@@ -1342,7 +1374,7 @@ def list_teams():
     result = []
     for t in teams:
         members = db.execute(
-            'SELECT id, ad_username, display_name, section_name, is_admin, email, team_id '
+            'SELECT id, ad_username, display_name, section_name, is_admin, is_super, email, team_id '
             'FROM users WHERE team_id = ? ORDER BY display_name',
             (t['id'],)
         ).fetchall()
@@ -1464,6 +1496,8 @@ def remove_team_member(team_id, user_id):
     user = db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
     if not user:
         return jsonify({'error': '用户不存在'}), 404
+    if dict(user).get('is_super', 0):
+        return jsonify({'error': '主管理员不可移除出团队'}), 403
     if user['team_id'] != team_id:
         return jsonify({'error': '该用户不在此团队中'}), 400
     # team_id 置空；如果是此团队的子管理员，降为普通用户
@@ -1485,6 +1519,8 @@ def update_team_member_role(team_id, user_id):
     user = db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
     if not user:
         return jsonify({'error': '用户不存在'}), 404
+    if dict(user).get('is_super', 0):
+        return jsonify({'error': '主管理员角色不可变更'}), 403
     if user['team_id'] != team_id:
         return jsonify({'error': '该用户不在此团队中'}), 400
     db.execute('UPDATE users SET is_admin = ? WHERE id = ?',
