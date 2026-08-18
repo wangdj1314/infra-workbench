@@ -497,21 +497,24 @@ def ai_chat(system, user, max_tokens=800, feature='unknown', provider=None):
     if api_key and str(api_key).lower() != 'none':
         headers['Authorization'] = f'Bearer {api_key}'
 
-    def _post(mt):
+    def _post(mt, extra=None):
+        body = {
+            'model': model,
+            'messages': [
+                {'role': 'system', 'content': system},
+                {'role': 'user', 'content': user}
+            ],
+            'temperature': 0.3,
+            'max_tokens': mt,
+            'stream': False
+        }
+        if extra:
+            body.update(extra)
         r = requests.post(
             f'{base_url}/chat/completions',
             headers=headers,
-            json={
-                'model': model,
-                'messages': [
-                    {'role': 'system', 'content': system},
-                    {'role': 'user', 'content': user}
-                ],
-                'temperature': 0.3,
-                'max_tokens': mt,
-                'stream': False
-            },
-            timeout=180
+            json=body,
+            timeout=300
         )
         r.raise_for_status()
         d = r.json()
@@ -525,9 +528,18 @@ def ai_chat(system, user, max_tokens=800, feature='unknown', provider=None):
         )
 
     content, finish, reasoning, usage = _post(max_tokens)
-    # v28.7：思考型模型（如 Qwen3.8）思考链耗尽 max_tokens 时 content 为空，加倍重试一次
-    if not content and reasoning and finish == 'length' and max_tokens < 4000:
-        content, finish, reasoning, usage = _post(min(max_tokens * 2, 6000))
+    # v28.8：思考型模型（如 Qwen3.8-27B）思考链可能耗尽全部 max_tokens 导致 content 为空
+    # 实测该场景思考+正文需 4000+ token；重试策略：关闭思考(vLLM chat_template_kwargs)+3倍token，
+    # 后端不支持该参数(400)时退化为纯加大 token
+    if not content:
+        _mt = min(max_tokens * 3, 16000)
+        for extra in ({'chat_template_kwargs': {'enable_thinking': False}}, None):
+            try:
+                content, finish, reasoning, usage = _post(_mt, extra)
+            except requests.HTTPError:
+                continue
+            if content:
+                break
     if not content:
         raise ValueError('AI 返回空内容（思考型模型 token 不足或响应异常），请重试或切换模型')
 
