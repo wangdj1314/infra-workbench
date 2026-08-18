@@ -611,7 +611,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="login-card">
     <div class="login-logo">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <h1>基础架构工作台 <span class="version-badge">v28.0</span></h1>
+      <h1>基础架构工作台 <span class="version-badge">v28.1</span></h1>
       <p>Infrastructure Team Workbench</p>
     </div>
     <div id="loginError" class="login-error hidden"></div>
@@ -636,7 +636,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="topbar">
     <div class="topbar-left">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" style="width:22px;height:22px"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v28.0">v28.0</span>
+      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v28.1">v28.1</span>
     </div>
     <div class="topbar-right">
       <div class="ai-token-badge" onclick="switchTab('apikey')" title="AI Token 消耗">
@@ -779,23 +779,28 @@ input,select,textarea{font-family:inherit;font-size:14px}
 
         <!-- Members Tab -->
         <div id="tab-members" class="hidden">
-          <div class="section-header">
-            <h2>团队成员管理</h2>
-            <button class="btn btn-primary-sm" onclick="showAddMemberModal()">+ 添加成员</button>
+          <!-- 基础架构板块（全局管理员可见：无team_id的用户 + team_id=NULL的板块） -->
+          <div id="membersInfraSection">
+            <div class="section-header">
+              <h2>基础架构团队</h2>
+              <button class="btn btn-primary-sm" onclick="showAddMemberModal(null)">+ 添加成员</button>
+            </div>
+            <table class="team-table">
+              <thead>
+                <tr><th>AD 账号</th><th>姓名</th><th>工号</th><th>邮箱</th><th>负责板块</th><th>岗位描述</th><th>工作项</th><th>待处理</th><th>逾期</th><th>操作</th></tr>
+              </thead>
+              <tbody id="membersInfraBody"></tbody>
+            </table>
+            <div class="section-header" style="margin-top:16px">
+              <h2 style="font-size:15px">基础架构 · 负责板块</h2>
+              <button class="btn btn-primary-sm" onclick="showAddAreaModal(null)">+ 添加板块</button>
+            </div>
+            <div id="areaInfraPanel" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px">
+              <p class="ai-hint">加载中...</p>
+            </div>
           </div>
-          <table class="team-table">
-            <thead>
-              <tr><th>AD 账号</th><th>姓名</th><th>工号</th><th>邮箱</th><th>负责板块</th><th>岗位描述</th><th>工作项</th><th>待处理</th><th>逾期</th><th>操作</th></tr>
-            </thead>
-            <tbody id="membersTableBody"></tbody>
-          </table>
-          <div class="section-header" style="margin-top:24px">
-            <h2>负责板块配置</h2>
-            <button class="btn btn-primary-sm" onclick="showAddAreaModal()">+ 添加板块</button>
-          </div>
-          <div id="areaConfigPanel" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px">
-            <p class="ai-hint">加载中...</p>
-          </div>
+          <!-- 各团队板块（动态渲染，每个团队一个section） -->
+          <div id="membersTeamSections"></div>
         </div>
 
         <!-- Organization Structure Tab -->
@@ -3576,51 +3581,113 @@ async function analyzeEmployee(userId) {
   }
 }
 
-// ---- 成员管理 ----
+// ---- 成员管理（v28.1：按团队分栏） ----
+let teamsCache = [];
+
+function _memberRowHtml(u) {
+  const hasJob = (u.job_description || '').trim();
+  const respTags = (u.responsibilities || '').split(',').filter(s=>s).map(s=>`<span class="tag-sm" style="display:inline-block;background:var(--primary-light);color:var(--primary);padding:1px 6px;border-radius:4px;font-size:11px;margin-right:4px">${escapeHtml(s)}</span>`).join('');
+  return `<tr>
+    <td>${escapeHtml(u.ad_username)}</td>
+    <td>${escapeHtml(u.display_name)} ${u.is_admin?'<span class="badge-admin" style="margin-left:4px">管理员</span>':''}</td>
+    <td>${escapeHtml(u.employee_id||'-')}</td>
+    <td>${escapeHtml(u.email||'-')}</td>
+    <td>${respTags || '-'}</td>
+    <td style="max-width:200px;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escapeHtml(hasJob)}">${hasJob || '<span style="color:var(--danger)">未填写</span>'}</td>
+    <td>${u.total_items}</td>
+    <td>${u.pending_items}</td>
+    <td style="color:${u.overdue_items>0?'var(--danger)':'var(--muted)'}">${u.overdue_items||0}</td>
+    <td>
+      <button class="btn btn-sm" onclick="showEditMemberModal(${u.id})">编辑</button>
+      ${hasJob ? `<button class="btn btn-sm btn-ai" onclick="analyzeMemberJob(${u.id})">AI 岗位分析</button>` : ''}
+      ${!u.is_admin ? `<button class="btn btn-sm btn-danger-sm" onclick="deleteMember(${u.id})">删除</button>` : ''}
+    </td>
+  </tr>`;
+}
+
+function _renderMembersToEl(users, elId) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  el.innerHTML = users.map(_memberRowHtml).join('')
+    || '<tr><td colspan="10" style="text-align:center;padding:40px;color:var(--muted)">暂无成员，点击右上方添加</td></tr>';
+}
+
 async function loadMembers() {
   try {
-    membersCache = await api('/api/admin/users');
-    const tbody = document.getElementById('membersTableBody');
-    tbody.innerHTML = membersCache.map(u => {
-      const hasJob = (u.job_description || '').trim();
-      const respTags = (u.responsibilities || '').split(',').filter(s=>s).map(s=>`<span class="tag-sm" style="display:inline-block;background:var(--primary-light);color:var(--primary);padding:1px 6px;border-radius:4px;font-size:11px;margin-right:4px">${escapeHtml(s)}</span>`).join('');
-      return `<tr>
-        <td>${escapeHtml(u.ad_username)}</td>
-        <td>${escapeHtml(u.display_name)} ${u.is_admin?'<span class="badge-admin" style="margin-left:4px">管理员</span>':''}</td>
-        <td>${escapeHtml(u.employee_id||'-')}</td>
-        <td>${escapeHtml(u.email||'-')}</td>
-        <td>${respTags || '-'}</td>
-        <td style="max-width:200px;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escapeHtml(hasJob)}">${hasJob || '<span style="color:var(--danger)">未填写</span>'}</td>
-        <td>${u.total_items}</td>
-        <td>${u.pending_items}</td>
-        <td style="color:${u.overdue_items>0?'var(--danger)':'var(--muted)'}">${u.overdue_items||0}</td>
-        <td>
-          <button class="btn btn-sm" onclick="showEditMemberModal(${u.id})">编辑</button>
-          ${hasJob ? `<button class="btn btn-sm btn-ai" onclick="analyzeMemberJob(${u.id})">AI 岗位分析</button>` : ''}
-          ${!u.is_admin ? `<button class="btn btn-sm btn-danger-sm" onclick="deleteMember(${u.id})">删除</button>` : ''}
-        </td>
-      </tr>`;
-    }).join('') || '<tr><td colspan="10" style="text-align:center;padding:40px;color:var(--muted)">暂无成员，点击右上方添加</td></tr>';
+    // 并行加载用户和团队
+    const [users, teams] = await Promise.all([
+      api('/api/admin/users'),
+      api('/api/org/teams').catch(() => [])
+    ]);
+    membersCache = users;
+    teamsCache = teams;
+
+    // 更新 filterMember 下拉（用于工作内容管理）
     const sel = document.getElementById('filterMember');
     if (sel) {
       const cur = sel.value;
-      sel.innerHTML = '<option value="">全部成员</option>' + membersCache.map(u =>
+      sel.innerHTML = '<option value="">全部成员</option>' + users.map(u =>
         `<option value="${u.id}">${escapeHtml(u.display_name)} (${escapeHtml(u.ad_username)})</option>`
       ).join('');
       sel.value = cur;
     }
+
+    const isSubAdmin = currentUser && currentUser.team_id;
+
+    // 基础架构区：team_id 为 null 的用户（仅全局管理员可见）
+    const infraSection = document.getElementById('membersInfraSection');
+    if (infraSection) {
+      if (isSubAdmin) {
+        infraSection.style.display = 'none';
+      } else {
+        infraSection.style.display = '';
+        const infraUsers = users.filter(u => !u.team_id);
+        _renderMembersToEl(infraUsers, 'membersInfraBody');
+      }
+    }
+
+    // 各团队区：按 team_id 分组
+    const teamBox = document.getElementById('membersTeamSections');
+    if (!teamBox) return;
+    teamBox.innerHTML = teams.map(t => {
+      const tUsers = users.filter(u => u.team_id === t.id);
+      return `<div style="margin-top:24px">
+        <div class="section-header">
+          <h2>${escapeHtml(t.name)}${t.description ? ` <span style="font-size:12px;color:var(--muted);font-weight:normal">· ${escapeHtml(t.description)}</span>` : ''}</h2>
+          <button class="btn btn-primary-sm" onclick="showAddMemberModal(${t.id})">+ 添加成员</button>
+        </div>
+        <table class="team-table">
+          <thead><tr><th>AD 账号</th><th>姓名</th><th>工号</th><th>邮箱</th><th>负责板块</th><th>岗位描述</th><th>工作项</th><th>待处理</th><th>逾期</th><th>操作</th></tr></thead>
+          <tbody id="membersTeam${t.id}Body">${tUsers.map(_memberRowHtml).join('') || '<tr><td colspan="10" style="text-align:center;padding:40px;color:var(--muted)">暂无成员，点击右上方添加</td></tr>'}</tbody>
+        </table>
+        <div class="section-header" style="margin-top:16px">
+          <h2 style="font-size:15px">${escapeHtml(t.name)} · 负责板块</h2>
+          <button class="btn btn-primary-sm" onclick="showAddAreaModal(${t.id})">+ 添加板块</button>
+        </div>
+        <div id="areaTeam${t.id}Panel" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px">
+          <p class="ai-hint">加载中...</p>
+        </div>
+      </div>`;
+    }).join('');
+    // 团队section已创建，渲染各团队的板块面板
+    renderAllAreaPanels();
   } catch(err) {
-    document.getElementById('membersTableBody').innerHTML = `<tr><td colspan="10" style="text-align:center;padding:40px;color:var(--danger)">${err.message}</td></tr>`;
+    const infraBody = document.getElementById('membersInfraBody');
+    if (infraBody) infraBody.innerHTML = `<tr><td colspan="10" style="text-align:center;padding:40px;color:var(--danger)">${err.message}</td></tr>`;
   }
 }
 
-function showAddMemberModal() {
-  const areaChecks = areaCache.length
-    ? areaCache.map(a => `<label style="display:flex;align-items:center;gap:6px;margin:4px 8px 4px 0;font-size:13px;cursor:pointer"><input type="checkbox" name="m_resp" value="${escapeHtml(a.name)}"> ${escapeHtml(a.name)}</label>`).join('')
+function showAddMemberModal(teamId) {
+  // v28.1：只显示与目标团队相关的板块
+  const relevantAreas = areaCache.filter(a => !a.team_id || a.team_id === teamId);
+  const areaChecks = relevantAreas.length
+    ? relevantAreas.map(a => `<label style="display:flex;align-items:center;gap:6px;margin:4px 8px 4px 0;font-size:13px;cursor:pointer"><input type="checkbox" name="m_resp" value="${escapeHtml(a.name)}"> ${escapeHtml(a.name)}</label>`).join('')
     : '<span style="color:var(--muted);font-size:12px">暂无板块，请在「负责板块配置」中添加后再选。</span>';
+  // 将 teamId 存入隐藏字段，供 submitAddMember 使用
   showModal(`
     <div class="modal-header"><h3>添加团队成员</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
     <div class="modal-body">
+      <input type="hidden" id="m_team_id" value="${teamId || ''}">
       <div class="form-row"><label>AD 域账号 *</label><input type="text" id="m_ad" placeholder="如 zhangsan" ></div>
       <div class="form-row"><label>显示姓名 *</label><input type="text" id="m_name" placeholder="如 张三" ></div>
       <div class="form-row"><label>工号</label><input type="text" id="m_emp" placeholder="如 R-68917" ></div>
@@ -3642,10 +3709,13 @@ async function submitAddMember() {
   const emp = document.getElementById('m_emp').value.trim();
   const email = document.getElementById('m_email').value.trim().toLowerCase();
   const jobDesc = document.getElementById('m_job_desc').value.trim();
+  const teamIdVal = document.getElementById('m_team_id').value;
   const respChecks = Array.from(document.querySelectorAll('input[name="m_resp"]:checked')).map(cb => cb.value).join(',');
   if (!ad || !name) { alert('AD 账号和显示名不能为空'); return; }
   try {
-    await api('/api/admin/users', {method:'POST', body:JSON.stringify({ad_username:ad, display_name:name, employee_id:emp, email:email, job_description:jobDesc, responsibilities:respChecks})});
+    const body = {ad_username:ad, display_name:name, employee_id:emp, email:email, job_description:jobDesc, responsibilities:respChecks};
+    if (teamIdVal) body.team_id = parseInt(teamIdVal);
+    await api('/api/admin/users', {method:'POST', body:JSON.stringify(body)});
     closeModal();
     loadMembers();
   } catch(err) { alert(err.message); }
@@ -3655,8 +3725,10 @@ function showEditMemberModal(id) {
   const u = membersCache.find(x => x.id === id);
   if (!u) return;
   const userResps = (u.responsibilities || '').split(',').filter(s=>s);
-  const areaChecks = areaCache.length
-    ? areaCache.map(a => {
+  // v28.1：只显示与该用户团队相关的板块
+  const relevantAreas = areaCache.filter(a => !a.team_id || a.team_id === u.team_id);
+  const areaChecks = relevantAreas.length
+    ? relevantAreas.map(a => {
     const checked = userResps.includes(a.name) ? 'checked' : '';
     return `<label style="display:flex;align-items:center;gap:6px;margin:4px 8px 4px 0;font-size:13px;cursor:pointer"><input type="checkbox" name="e_resp" value="${escapeHtml(a.name)}" ${checked}> ${escapeHtml(a.name)}</label>`;
   }).join('')
@@ -3700,22 +3772,22 @@ async function deleteMember(id) {
   } catch(err) { alert(err.message); }
 }
 
-// ---- 负责板块配置（v16） ----
+// ---- 负责板块配置（v28.1：按团队分栏） ----
 async function loadResponsibilityAreas() {
   try {
     areaCache = await api('/api/responsibility-areas');
-    renderAreaConfig();
+    renderAllAreaPanels();
   } catch(err) { console.log('load areas failed', err); }
 }
 
-function renderAreaConfig() {
-  const el = document.getElementById('areaConfigPanel');
+function _renderAreaList(areas, elId) {
+  const el = document.getElementById(elId);
   if (!el) return;
-  if (!areaCache.length) {
+  if (!areas.length) {
     el.innerHTML = '<p class="ai-hint">暂无板块，点击上方「添加板块」创建。</p>';
     return;
   }
-  el.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:8px">' + areaCache.map(a => `
+  el.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:8px">' + areas.map(a => `
     <div style="display:flex;align-items:center;gap:6px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:13px">
       <span>${escapeHtml(a.name)}</span>
       <button class="btn btn-sm" style="padding:2px 6px;font-size:11px" onclick="showEditAreaModal(${a.id}, '${escapeHtml(a.name)}')">编辑</button>
@@ -3724,10 +3796,33 @@ function renderAreaConfig() {
   `).join('') + '</div>';
 }
 
-function showAddAreaModal() {
+function renderAllAreaPanels() {
+  const isSubAdmin = currentUser && currentUser.team_id;
+  // 基础架构面板（team_id=NULL 的板块，仅全局管理员可见）
+  const infraPanel = document.getElementById('areaInfraPanel');
+  if (infraPanel) {
+    if (isSubAdmin) {
+      document.getElementById('membersInfraSection')?.querySelector('.section-header:last-of-type')?.setAttribute('style','display:none');
+      infraPanel.parentElement.style.display = 'none';
+    } else {
+      const infraAreas = areaCache.filter(a => !a.team_id);
+      _renderAreaList(infraAreas, 'areaInfraPanel');
+    }
+  }
+  // 各团队面板
+  teamsCache.forEach(t => {
+    const teamAreas = areaCache.filter(a => a.team_id === t.id);
+    _renderAreaList(teamAreas, `areaTeam${t.id}Panel`);
+  });
+}
+
+function showAddAreaModal(teamId) {
   showModal(`
     <div class="modal-header"><h3>添加负责板块</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
-    <div class="modal-body"><div class="form-row"><label>板块名称 *</label><input type="text" id="a_name" placeholder="如 数据中心网络"></div></div>
+    <div class="modal-body">
+      <input type="hidden" id="a_team_id" value="${teamId || ''}">
+      <div class="form-row"><label>板块名称 *</label><input type="text" id="a_name" placeholder="如 数据中心网络"></div>
+    </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn btn-primary-sm" onclick="submitAddArea()">添加</button>
@@ -3737,8 +3832,15 @@ function showAddAreaModal() {
 
 async function submitAddArea() {
   const name = document.getElementById('a_name').value.trim();
+  const teamIdVal = document.getElementById('a_team_id').value;
   if (!name) { alert('板块名称不能为空'); return; }
-  try { await api('/api/responsibility-areas', {method:'POST', body:JSON.stringify({name})}); closeModal(); loadResponsibilityAreas(); }
+  try {
+    const body = {name};
+    if (teamIdVal) body.team_id = parseInt(teamIdVal);
+    await api('/api/responsibility-areas', {method:'POST', body:JSON.stringify(body)});
+    closeModal();
+    loadResponsibilityAreas();
+  }
   catch(err) { alert(err.message); }
 }
 
@@ -4991,7 +5093,7 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-// ---- v28.0 组织架构管理 ----
+// ---- v28.1 组织架构管理 ----
 let _orgTeams = [];
 let _orgAllUsers = [];
 

@@ -125,6 +125,17 @@ def init_db():
             conn.execute('ALTER TABLE users ADD COLUMN team_id INTEGER DEFAULT NULL')
         except Exception:
             pass  # 列已存在
+        # v28.1：responsibility_areas 表增加 team_id 列（板块按团队分组）
+        try:
+            conn.execute('ALTER TABLE responsibility_areas ADD COLUMN team_id INTEGER DEFAULT NULL')
+        except Exception:
+            pass  # 列已存在
+        # v28.1：初始化默认团队（幂等）
+        for _tname, _tdesc in [('基础架构团队', 'IT基础架构运维团队'), ('信息安全团队', '信息安全团队')]:
+            try:
+                conn.execute('INSERT INTO teams (name, description) VALUES (?, ?)', (_tname, _tdesc))
+            except Exception:
+                pass  # 已存在则跳过
         # 初始化默认板块（若表为空）
         try:
             area_count = conn.execute('SELECT COUNT(*) as c FROM responsibility_areas').fetchone()['c']
@@ -337,6 +348,16 @@ def admin_required(f):
             return jsonify({'error': '需要管理员权限'}), 403
         return f(*args, **kwargs)
     return decorated
+
+
+def get_admin_scope():
+    """v28.1：返回当前管理员的团队作用域。
+    - 全局管理员（team_id=None）→ 返回 None，表示可看所有
+    - 团队子管理员（team_id=X）→ 返回 X，表示只能看该团队
+    """
+    if not session.get('is_admin'):
+        return None
+    return session.get('team_id')  # None = 全局管理员, int = 团队子管理员
 
 
 def api_key_required(f):
@@ -676,6 +697,7 @@ def login():
         session['user_id'] = user['id']
         session['ad_username'] = user['ad_username']
         session['is_admin'] = bool(user['is_admin'])
+        session['team_id'] = user['team_id']
         session['display_name'] = display_name or user['display_name']
     elif username == ADMIN_USERNAME.lower():
         db.execute(
@@ -688,6 +710,7 @@ def login():
         session['user_id'] = user['id']
         session['ad_username'] = username
         session['is_admin'] = True
+        session['team_id'] = user.get('team_id')  # 全局管理员通常为 None
         session['display_name'] = display_name or username
     else:
         return jsonify({'error': '您不在基础架构团队成员名单中，请联系管理员添加'}), 403
@@ -696,7 +719,8 @@ def login():
         'id': session['user_id'],
         'username': session['ad_username'],
         'display_name': session['display_name'],
-        'is_admin': session['is_admin']
+        'is_admin': session['is_admin'],
+        'team_id': session.get('team_id')
     })
 
 
@@ -713,7 +737,8 @@ def me():
         'id': session['user_id'],
         'username': session['ad_username'],
         'display_name': session['display_name'],
-        'is_admin': session.get('is_admin', False)
+        'is_admin': session.get('is_admin', False),
+        'team_id': session.get('team_id')
     })
 
 
@@ -724,7 +749,12 @@ def me():
 @admin_required
 def list_users():
     db = get_db()
-    users = db.execute('SELECT * FROM users ORDER BY id').fetchall()
+    scope_team_id = get_admin_scope()
+    # v28.1：子管理员只能看到本团队成员
+    if scope_team_id:
+        users = db.execute('SELECT * FROM users WHERE team_id = ? ORDER BY id', (scope_team_id,)).fetchall()
+    else:
+        users = db.execute('SELECT * FROM users ORDER BY id').fetchall()
     result = []
     for u in users:
         total = db.execute('SELECT COUNT(*) as c FROM work_items WHERE user_id = ?', (u['id'],)).fetchone()['c']
@@ -769,6 +799,11 @@ def add_user():
     email = (data.get('email') or '').strip().lower()
     job_description = (data.get('job_description') or '').strip()
     responsibilities = (data.get('responsibilities') or '').strip()
+    # v28.1：team_id — 子管理员强制自己的 team_id，全局管理员可指定
+    team_id = data.get('team_id')
+    scope_team_id = get_admin_scope()
+    if scope_team_id:
+        team_id = scope_team_id
 
     if not ad_username or not display_name:
         return jsonify({'error': 'AD 用户名和显示名不能为空'}), 400
@@ -776,8 +811,8 @@ def add_user():
     db = get_db()
     try:
         db.execute(
-            'INSERT INTO users (ad_username, display_name, section_name, employee_id, email, job_description, responsibilities) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            (ad_username, display_name, section_name, employee_id, email, job_description, responsibilities)
+            'INSERT INTO users (ad_username, display_name, section_name, employee_id, email, job_description, responsibilities, team_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            (ad_username, display_name, section_name, employee_id, email, job_description, responsibilities, team_id)
         )
         db.commit()
     except sqlite3.IntegrityError:
@@ -799,6 +834,12 @@ def add_user():
 @app.route('/api/admin/users/<int:user_id>', methods=['PUT'])
 @admin_required
 def update_user(user_id):
+    # v28.1：子管理员只能更新自己团队的用户
+    scope_team_id = get_admin_scope()
+    if scope_team_id:
+        target = get_db().execute('SELECT team_id FROM users WHERE id = ?', (user_id,)).fetchone()
+        if not target or target['team_id'] != scope_team_id:
+            return jsonify({'error': '无权修改其他团队的成员'}), 403
     data = request.get_json(silent=True) or {}
     db = get_db()
     updates = []
@@ -833,6 +874,12 @@ def update_user(user_id):
 @app.route('/api/admin/users/<int:user_id>', methods=['DELETE'])
 @admin_required
 def delete_user(user_id):
+    # v28.1：子管理员只能删除自己团队的用户
+    scope_team_id = get_admin_scope()
+    if scope_team_id:
+        target = get_db().execute('SELECT team_id FROM users WHERE id = ?', (user_id,)).fetchone()
+        if not target or target['team_id'] != scope_team_id:
+            return jsonify({'error': '无权删除其他团队的成员'}), 403
     db = get_db()
     user = db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
     if not user:
@@ -857,8 +904,16 @@ def delete_user(user_id):
 @login_required
 def list_responsibility_areas():
     db = get_db()
-    rows = db.execute('SELECT id, name, created_at FROM responsibility_areas ORDER BY id').fetchall()
-    return jsonify([{'id': r['id'], 'name': r['name'], 'created_at': r['created_at']} for r in rows])
+    scope_team_id = get_admin_scope()
+    # v28.1：子管理员看到本团队板块 + 全局板块（team_id=NULL）；全局管理员看到全部
+    if scope_team_id:
+        rows = db.execute(
+            'SELECT id, name, team_id, created_at FROM responsibility_areas WHERE team_id IS NULL OR team_id = ? ORDER BY id',
+            (scope_team_id,)
+        ).fetchall()
+    else:
+        rows = db.execute('SELECT id, name, team_id, created_at FROM responsibility_areas ORDER BY id').fetchall()
+    return jsonify([{'id': r['id'], 'name': r['name'], 'team_id': r['team_id'], 'created_at': r['created_at']} for r in rows])
 
 
 @app.route('/api/responsibility-areas', methods=['POST'])
@@ -868,11 +923,16 @@ def add_responsibility_area():
     name = (data.get('name') or '').strip()
     if not name:
         return jsonify({'error': '板块名称不能为空'}), 400
+    # v28.1：子管理员创建的板块自动归属其团队；全局管理员可指定 team_id
+    scope_team_id = get_admin_scope()
+    team_id = data.get('team_id')
+    if scope_team_id:
+        team_id = scope_team_id  # 子管理员强制使用自己的 team_id
     db = get_db()
     try:
-        cur = db.execute('INSERT INTO responsibility_areas (name) VALUES (?)', (name,))
+        cur = db.execute('INSERT INTO responsibility_areas (name, team_id) VALUES (?, ?)', (name, team_id))
         db.commit()
-        return jsonify({'id': cur.lastrowid, 'name': name})
+        return jsonify({'id': cur.lastrowid, 'name': name, 'team_id': team_id})
     except sqlite3.IntegrityError:
         return jsonify({'error': '板块名称已存在'}), 400
 
@@ -885,6 +945,14 @@ def update_responsibility_area(area_id):
     if not name:
         return jsonify({'error': '板块名称不能为空'}), 400
     db = get_db()
+    # v28.1：子管理员只能修改本团队板块
+    scope_team_id = get_admin_scope()
+    if scope_team_id:
+        area = db.execute('SELECT * FROM responsibility_areas WHERE id = ?', (area_id,)).fetchone()
+        if not area:
+            return jsonify({'error': '板块不存在'}), 404
+        if area['team_id'] and area['team_id'] != scope_team_id:
+            return jsonify({'error': '无权修改其他团队的板块'}), 403
     try:
         db.execute('UPDATE responsibility_areas SET name = ? WHERE id = ?', (name, area_id))
         db.commit()
@@ -897,6 +965,14 @@ def update_responsibility_area(area_id):
 @admin_required
 def delete_responsibility_area(area_id):
     db = get_db()
+    # v28.1：子管理员只能删除本团队板块
+    scope_team_id = get_admin_scope()
+    if scope_team_id:
+        area = db.execute('SELECT * FROM responsibility_areas WHERE id = ?', (area_id,)).fetchone()
+        if not area:
+            return jsonify({'error': '板块不存在'}), 404
+        if area['team_id'] and area['team_id'] != scope_team_id:
+            return jsonify({'error': '无权删除其他团队的板块'}), 403
     db.execute('DELETE FROM responsibility_areas WHERE id = ?', (area_id,))
     db.commit()
     return jsonify({'message': '已删除'})
@@ -1185,9 +1261,13 @@ def team_member_job_analysis(user_id):
 @app.route('/api/org/teams')
 @login_required
 def list_teams():
-    """获取所有团队及其成员"""
+    """获取所有团队及其成员（v28.1：子管理员只看自己的团队）"""
     db = get_db()
-    teams = db.execute('SELECT * FROM teams ORDER BY id').fetchall()
+    scope_team_id = get_admin_scope()
+    if scope_team_id:
+        teams = db.execute('SELECT * FROM teams WHERE id = ? ORDER BY id', (scope_team_id,)).fetchall()
+    else:
+        teams = db.execute('SELECT * FROM teams ORDER BY id').fetchall()
     result = []
     for t in teams:
         members = db.execute(
@@ -1232,6 +1312,9 @@ def create_team():
 @admin_required
 def update_team(team_id):
     """更新团队信息"""
+    scope_team_id = get_admin_scope()
+    if scope_team_id and scope_team_id != team_id:
+        return jsonify({'error': '无权操作其他团队'}), 403
     data = request.get_json(silent=True) or {}
     db = get_db()
     team = db.execute('SELECT * FROM teams WHERE id = ?', (team_id,)).fetchone()
@@ -1255,6 +1338,9 @@ def update_team(team_id):
 @admin_required
 def delete_team(team_id):
     """删除团队（成员 team_id 置空）"""
+    scope_team_id = get_admin_scope()
+    if scope_team_id and scope_team_id != team_id:
+        return jsonify({'error': '无权操作其他团队'}), 403
     db = get_db()
     team = db.execute('SELECT * FROM teams WHERE id = ?', (team_id,)).fetchone()
     if not team:
@@ -1274,6 +1360,9 @@ def delete_team(team_id):
 @admin_required
 def add_team_member(team_id):
     """添加成员到团队（设置用户的 team_id）"""
+    scope_team_id = get_admin_scope()
+    if scope_team_id and scope_team_id != team_id:
+        return jsonify({'error': '无权操作其他团队'}), 403
     data = request.get_json(silent=True) or {}
     user_id = data.get('user_id')
     is_team_admin = data.get('is_team_admin', False)
@@ -1297,6 +1386,9 @@ def add_team_member(team_id):
 @admin_required
 def remove_team_member(team_id, user_id):
     """从团队移除成员（team_id 置空，如果是子管理员则降级为普通用户）"""
+    scope_team_id = get_admin_scope()
+    if scope_team_id and scope_team_id != team_id:
+        return jsonify({'error': '无权操作其他团队'}), 403
     db = get_db()
     user = db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
     if not user:
@@ -1313,6 +1405,9 @@ def remove_team_member(team_id, user_id):
 @admin_required
 def update_team_member_role(team_id, user_id):
     """更新团队成员角色（子管理员/普通成员）"""
+    scope_team_id = get_admin_scope()
+    if scope_team_id and scope_team_id != team_id:
+        return jsonify({'error': '无权操作其他团队'}), 403
     data = request.get_json(silent=True) or {}
     is_team_admin = data.get('is_team_admin', False)
     db = get_db()
@@ -1359,6 +1454,11 @@ def list_work_items():
     elif session.get('is_admin') and user_filter:
         query += ' AND w.user_id = ?'
         params.append(user_filter)
+    elif session.get('is_admin') and get_admin_scope():
+        # v28.1：子管理员无指定用户时，只看自己团队成员的工作项
+        scope_team_id = get_admin_scope()
+        query += ' AND w.user_id IN (SELECT id FROM users WHERE team_id = ?)'
+        params.append(scope_team_id)
     elif not session.get('is_admin'):
         # 普通用户：查看自己的任务 + 作为协同者的任务
         query += " AND (w.user_id = ? OR (',' || w.collaborators || ',') LIKE ?)"
@@ -1451,6 +1551,12 @@ def add_work_item():
     user_id = data.get('user_id')
     if not user_id:
         return jsonify({'error': '必须选择成员'}), 400
+    # v28.1：子管理员只能给自己团队的成员创建工作项
+    scope_team_id = get_admin_scope()
+    if scope_team_id:
+        target_user = get_db().execute('SELECT team_id FROM users WHERE id = ?', (int(user_id),)).fetchone()
+        if not target_user or target_user['team_id'] != scope_team_id:
+            return jsonify({'error': '无权为其他团队的成员创建工作项'}), 403
     if not (data.get('title') or '').strip():
         return jsonify({'error': '必须填写标题'}), 400
     db = get_db()
