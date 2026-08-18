@@ -7,7 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <title>基础架构工作台</title>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=27.0">
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=27.1">
 <style>
 :root{
   --bg:#0d1117;--surface:#161b22;--surface2:#21262d;--border:#30363d;
@@ -611,7 +611,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="login-card">
     <div class="login-logo">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <h1>基础架构工作台 <span class="version-badge">v27.0</span></h1>
+      <h1>基础架构工作台 <span class="version-badge">v27.1</span></h1>
       <p>Infrastructure Team Workbench</p>
     </div>
     <div id="loginError" class="login-error hidden"></div>
@@ -636,7 +636,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="topbar">
     <div class="topbar-left">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" style="width:22px;height:22px"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v27.0">v27.0</span>
+      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v27.1">v27.1</span>
     </div>
     <div class="topbar-right">
       <div class="ai-token-badge" onclick="switchTab('apikey')" title="AI Token 消耗">
@@ -767,7 +767,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
             </select>
             <input type="text" id="itopSearch" placeholder="搜索工单号/标题" style="margin-left:8px;width:180px" onkeydown="if(event.key==='Enter')itopDoSearch()">
             <button class="btn btn-sm" onclick="itopDoSearch()">搜索</button>
-            <label id="itopScopeLabel" style="margin-left:auto;font-size:12px;color:var(--muted)"><input type="checkbox" id="itopScope" onchange="loadItopTickets()"> 管理员：查看全团队</label>
+            <label id="itopScopeLabel" style="margin-left:auto;font-size:12px;color:var(--muted)"><input type="checkbox" id="itopScope" onchange="loadItopTickets()"> 管理员：查看本团队</label>
           </div>
           <div id="itopTickets"></div>
           <div class="section-header" id="itopAdminBox" style="display:none">
@@ -1275,10 +1275,10 @@ async function loadItopStatus() {
     Object.values(d.by_class || {}).forEach(b => { active += (b.active||0); closed += (b.closed||0); });
     const st = d.sync_state || {};
     const cards = [
-      {label:'工单总数', value:d.total, cls:''},
+      {label:'团队工单', value:d.total, cls:''},
       {label:'处理中', value:active, cls:active>0?'primary':''},
       {label:'已完结', value:closed, cls:'success'},
-      {label:'未映射工程师', value:(d.unmapped_agents||[]).length, cls:(d.unmapped_agents||[]).length>0?'warning':''},
+      {label:'已映射工程师', value:d.mapped_users||0, cls:''},
     ];
     const syncLine = st.running ? '同步进行中...' : ('上次数据更新 ' + (d.last_data_at || '无').substring(5, 16));
     document.getElementById('itopStats').innerHTML =
@@ -1424,6 +1424,7 @@ async function itopSyncNow(mode) {
   } catch(err) { alert('同步失败：' + err.message); }
 }
 
+let itopSelectedAgent = null;
 async function loadItopUserMap() {
   try {
     if (!membersCache || !membersCache.length) {
@@ -1434,37 +1435,59 @@ async function loadItopUserMap() {
     }
     const d = await api('/api/itop/user-map');
     const maps = d.mappings || [];
-    const agents = d.agents || [];
     const userOpts = (membersCache || []).map(u => `<option value="${u.id}">${escapeHtml(u.display_name)}</option>`).join('');
-    const rows = agents.map(a => {
-      const m = maps.find(x => x.itop_agent_name === a.agent_name);
-      const cur = (m && m.user_id) ? (m.display_name || ('用户#' + m.user_id)) : '';
-      const canAuto = (membersCache || []).some(u =>
-        (u.display_name || '').endsWith('-' + a.agent_name) || u.display_name === a.agent_name);
-      const label = cur || (canAuto ? '自动匹配' : '未映射');
-      return `<tr>
-        <td>${escapeHtml(a.agent_name)}</td>
-        <td>${a.c}</td>
-        <td>
-          <select onchange="itopSetMap('${escapeHtml(a.agent_name)}', this.value)">
-            <option value="">${label}</option>
-            ${userOpts}
-          </select>
-        </td>
-      </tr>`;
-    }).join('');
-    document.getElementById('itopUserMap').innerHTML = agents.length ? `
-      <table class="team-table"><thead><tr><th>iTop 工程师</th><th>工单数</th><th>映射到工作台用户</th></tr></thead><tbody>${rows}</tbody></table>
-      <p class="ai-hint">仅本团队成员需要映射；统计只计入映射到工作台用户的工单。选择第一项可清除映射（恢复自动匹配）。</p>` : '';
+    const rows = maps.map(m => `<tr>
+        <td>${escapeHtml(m.itop_agent_name)}</td>
+        <td>${escapeHtml(m.display_name || ('用户#' + m.user_id))}</td>
+        <td><button class="btn btn-sm" onclick="itopClearMap('${escapeHtml(m.itop_agent_name)}')">清除</button></td>
+      </tr>`).join('');
+    document.getElementById('itopUserMap').innerHTML = `
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <input type="text" id="itopMapSearch" placeholder="搜索 iTop 工程师姓名…" style="width:180px" onkeydown="if(event.key==='Enter')itopSearchAgents()">
+        <button class="btn btn-sm" onclick="itopSearchAgents()">搜索</button>
+        <select id="itopMapUser" style="min-width:150px"><option value="">选择工作台用户</option>${userOpts}</select>
+        <button class="btn btn-primary-sm" onclick="itopSaveMap()">建立映射</button>
+      </div>
+      <div id="itopAgentResults" style="margin-bottom:8px"></div>
+      ${maps.length ? `<table class="team-table"><thead><tr><th>iTop 工程师</th><th>映射到</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>` : ''}
+      <p class="ai-hint">先搜索并点选 iTop 工程师，再选择工作台用户建立映射；姓名能自动匹配（"EN-中文名"格式）的无需登记。</p>`;
   } catch(err) { /* 静默 */ }
 }
 
-async function itopSetMap(name, uid) {
+async function itopSearchAgents() {
+  const q = document.getElementById('itopMapSearch').value.trim();
+  if (!q) { alert('请输入工程师姓名关键字'); return; }
+  try {
+    const d = await api('/api/itop/user-map?q=' + encodeURIComponent(q));
+    const agents = d.agents || [];
+    document.getElementById('itopAgentResults').innerHTML = agents.length
+      ? agents.map(a => `<button class="filter-btn" style="cursor:pointer;${itopSelectedAgent === a.agent_name ? 'background:var(--primary);color:#fff' : ''}" onclick="itopPickAgent('${escapeHtml(a.agent_name)}')">${escapeHtml(a.agent_name)}（${a.c}张）</button>`).join(' ')
+      : '<span class="ai-hint">无匹配工程师</span>';
+  } catch(err) { alert('搜索失败：' + err.message); }
+}
+
+function itopPickAgent(name) { itopSelectedAgent = name; itopSearchAgents(); }
+
+async function itopSaveMap() {
+  if (!itopSelectedAgent) { alert('请先搜索并点选 iTop 工程师'); return; }
+  const uid = document.getElementById('itopMapUser').value;
+  if (!uid) { alert('请选择工作台用户'); return; }
   try {
     await api('/api/itop/user-map', {method:'POST', body: JSON.stringify({
-      itop_agent_name: name, user_id: uid ? parseInt(uid) : null})});
+      itop_agent_name: itopSelectedAgent, user_id: parseInt(uid)})});
+    itopSelectedAgent = null;
+    document.getElementById('itopAgentResults').innerHTML = '';
     loadItopTickets();
-  } catch(err) { alert('设置失败：' + err.message); }
+  } catch(err) { alert('保存失败：' + err.message); }
+}
+
+async function itopClearMap(name) {
+  if (!confirm('清除 ' + name + ' 的映射？其工单将不再计入任何用户。')) return;
+  try {
+    await api('/api/itop/user-map', {method:'POST', body: JSON.stringify({
+      itop_agent_name: name, user_id: null})});
+    loadItopTickets();
+  } catch(err) { alert('清除失败：' + err.message); }
 }
 
 // ---- Work Items ----

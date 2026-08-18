@@ -5916,22 +5916,24 @@ def itop_status():
     conn = get_db()
     by_class = {}
     for r in conn.execute(
-            'SELECT ticket_class, status, COUNT(*) as c FROM itop_tickets GROUP BY ticket_class, status').fetchall():
+            'SELECT ticket_class, status, COUNT(*) as c FROM itop_tickets '
+            'WHERE user_id IS NOT NULL GROUP BY ticket_class, status').fetchall():
         by_class.setdefault(r['ticket_class'], {'total': 0, 'active': 0, 'closed': 0})
         by_class[r['ticket_class']]['total'] += r['c']
         if r['status'] in ITOP_CLOSED_STATUSES:
             by_class[r['ticket_class']]['closed'] += r['c']
         else:
             by_class[r['ticket_class']]['active'] += r['c']
-    unmapped = [r['agent_name'] for r in conn.execute(
-        "SELECT DISTINCT agent_name FROM itop_tickets "
-        "WHERE user_id IS NULL AND agent_name != '' ORDER BY agent_name").fetchall()]
-    total = conn.execute('SELECT COUNT(*) as c FROM itop_tickets').fetchone()['c']
-    last_data = conn.execute('SELECT MAX(updated_at) as t FROM itop_tickets').fetchone()['t'] or ''
+    # v27.1：口径限定本团队（映射到工作台用户的工单）；mapped_users = 已映射工程师数
+    mapped_users = conn.execute(
+        'SELECT COUNT(DISTINCT user_id) as c FROM itop_tickets WHERE user_id IS NOT NULL').fetchone()['c']
+    total = conn.execute(
+        'SELECT COUNT(*) as c FROM itop_tickets WHERE user_id IS NOT NULL').fetchone()['c']
+    last_data = conn.execute('SELECT MAX(updated_at) as t FROM itop_tickets WHERE user_id IS NOT NULL').fetchone()['t'] or ''
     return jsonify({
         'enabled': True, 'mcp_url': ITOP_MCP_URL,
         'total': total, 'by_class': by_class,
-        'unmapped_agents': unmapped, 'last_data_at': last_data,
+        'mapped_users': mapped_users, 'last_data_at': last_data,
         'sync_state': _ITOP_SYNC_STATE
     })
 
@@ -5943,7 +5945,7 @@ def itop_tickets_list():
     conn = get_db()
     where, params = [], []
     if session.get('is_admin') and request.args.get('scope') == 'team':
-        pass
+        where.append('user_id IS NOT NULL')
     elif session.get('is_admin') and request.args.get('user_id'):
         where.append('user_id = ?')
         params.append(int(request.args.get('user_id')))
@@ -6103,10 +6105,16 @@ def itop_user_map_list():
         FROM itop_user_map m LEFT JOIN users u ON m.user_id = u.id
         ORDER BY m.itop_agent_name
     """).fetchall()
-    agents = conn.execute("""
-        SELECT agent_name, COUNT(*) as c FROM itop_tickets
-        WHERE agent_name != '' GROUP BY agent_name ORDER BY c DESC
-    """).fetchall()
+    # v27.1：工程师列表改为按关键字搜索（前端手动选择映射），默认不返回全量
+    q = (request.args.get('q') or '').strip()
+    if q:
+        agents = conn.execute("""
+            SELECT agent_name, COUNT(*) as c FROM itop_tickets
+            WHERE agent_name != '' AND agent_name LIKE ?
+            GROUP BY agent_name ORDER BY c DESC LIMIT 20
+        """, ('%' + q + '%',)).fetchall()
+    else:
+        agents = []
     return jsonify({'mappings': [dict(r) for r in maps], 'agents': [dict(r) for r in agents]})
 
 
