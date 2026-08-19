@@ -2,6 +2,20 @@
 
 版本规则：主版本号跟随年份迭代（v25.x → v26.0），功能变更在本文件登记。
 
+## v29.0（2026-08-19）
+
+### 修复：iTop 工单流转与日志全链路（重大重构）
+- **根因一（部署）**：容器重建后 `ITOP_MCP_URL` 环境变量丢失，所有写回（流转/日志/同步）报 `Failed to resolve 'your_server_ip'`；已在 compose 中固化该变量
+- **根因二（字段）**：定制版 iTop 各工单类必填字段与枚举值不同——`ev_assign` 需 team_id/agent_id/servicefamily_id/service_id 四件套；`ev_pending` 需 pending_reason；Incident 的 `ev_resolve` 需 resolution_code/solution/difficulty_level（且随工单字段现值动态变化，如 servicesubcategory_id 为空时一并要求）；UserRequest 无 difficulty_level 字段（v28.9 的三件套对其反致 `Unknown attribute`）；resolution_code 枚举为定制值（Incident：1=远程解决/2=现场解决；UserRequest：assistance=日常运维），标准 iTop 值（solved 等）全部非法
+- **后端自适应**：流转字段白名单过滤；`Unknown attribute` 自动剔除并重试；`Missing mandatory` 解析为 `need_fields` 返回（前端动态补填）；`Invalid stimulus` 转友好中文提示；已测试全部路径（含 UserRequest 三件套自动剔除、Incident in_process 动态四件套、状态机 new→assigned→resolved→closed 全链）
+- **前端动态化**：流转弹窗按动作渲染字段（解决方式按工单类定制枚举、挂起原因、指派四件套预填工单现值）；iTop 返回缺失必填字段时弹窗内动态出现补填输入框；流转成功显示新状态
+- 依赖：requirements.txt 补 pymysql/cryptography（MySQL 后端必需，此前仅服务器手工安装）
+
+## v28.9（2026-08-18）
+
+### 修复：iTop ev_resolve 必填字段
+- Incident 工单"标记解决"时补传 resolution_code/solution/difficulty_level（v29.0 进一步修复该组合对 UserRequest 的误伤，并更正枚举值为定制版）
+
 ## v28.8（2026-08-18）
 
 ### 修复：思考型模型重试策略针对性调整

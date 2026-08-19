@@ -611,7 +611,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="login-card">
     <div class="login-logo">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <h1>基础架构工作台 <span class="version-badge">v28.9</span></h1>
+      <h1>基础架构工作台 <span class="version-badge">v29.0</span></h1>
       <p>Infrastructure Team Workbench</p>
     </div>
     <div id="loginError" class="login-error hidden"></div>
@@ -636,7 +636,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="topbar">
     <div class="topbar-left">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" style="width:22px;height:22px"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v28.9">v28.9</span>
+      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v29.0">v29.0</span>
     </div>
     <div class="topbar-right">
       <div class="ai-token-badge" onclick="switchTab('apikey')" title="AI Token 消耗">
@@ -1351,7 +1351,7 @@ async function showItopTicketModal(cls, ref) {
         <div style="color:var(--muted)">${escapeHtml(String(e.date || '').substring(0, 16))} · ${escapeHtml(e.user_friendlyname || e.user || '')}</div>
         <div style="white-space:pre-wrap">${escapeHtml(e.message || e.text || '')}</div>
       </div>`).join('') : '<p style="color:var(--muted);font-size:12px">暂无日志</p>';
-    window._itopCur = {cls, ref: t.ticket_ref, status: t.status};
+    window._itopCur = {cls, ref: t.ticket_ref, status: t.status, raw: raw};
     showModal(`
       <div class="modal-header"><h3>${escapeHtml(t.ticket_ref)} · ${itopClassText(t.ticket_class)}</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
       <div class="modal-body">
@@ -1391,9 +1391,46 @@ async function itopSubmitLog(cls, ref) {
   } catch(err) { alert('写回失败：' + err.message); }
 }
 
+// v29.0 流转字段中文名映射（动态补填弹窗用）
+const ITOP_FIELD_LABELS = {
+  resolution_code: '解决方式', solution: '解决方案', difficulty_level: '难度等级',
+  pending_reason: '挂起原因', team_id: '处理团队ID', agent_id: '处理工程师ID',
+  servicefamily_id: '服务族ID', service_id: '服务ID', servicesubcategory_id: '服务子类ID',
+  caller_id: '发起人ID', org_id: '组织ID', approver_id: '审批人ID', receiver_id: '接收人ID',
+  time_spent: '处理时长', user_satisfaction: '用户满意度', user_comment: '用户评价',
+  return_reason: '退回原因', assigne_reason: '指派原因', withdraw_reason: '撤回原因',
+  notes: '备注', comment: '备注说明', handling_method: '处理方式', is_repair: '是否返修',
+  symptom: '故障现象', repair_notes: '返修说明'
+};
+
+function itopFieldLabel(fid) { return ITOP_FIELD_LABELS[fid] || fid; }
+
+// v29.0 按字段名生成输入控件（预填 val）；枚举值取自定制版 iTop 字典
+function itopFieldInput(fid, val) {
+  const v = (val === undefined || val === null) ? '' : String(val);
+  const id = 'xf_' + fid;
+  if (fid === 'resolution_code') {
+    return `<select id="${id}">
+      <option value="1">远程解决</option>
+      <option value="2">现场解决</option>
+      <option value="assistance">日常运维</option>
+    </select>`;
+  }
+  if (fid === 'difficulty_level') {
+    return `<select id="${id}"><option value="1" selected>1 - 简</option><option value="2">2 - 中</option><option value="3">3 - 难</option></select>`;
+  }
+  if (fid === 'solution' || fid === 'pending_reason' || fid.endsWith('_reason') || fid === 'user_comment' || fid === 'notes' || fid === 'comment' || fid.endsWith('_notes')) {
+    return `<textarea id="${id}" style="min-height:60px">${escapeHtml(v)}</textarea>`;
+  }
+  if (fid.endsWith('_id')) return `<input type="number" id="${id}" value="${escapeHtml(v)}" placeholder="数字ID">`;
+  return `<input type="text" id="${id}" value="${escapeHtml(v)}">`;
+}
+
 function itopApplyStimulusGo() {
   const cur = window._itopCur;
   if (!cur) return;
+  const raw = cur.raw || {};
+  const isUr = cur.cls === 'UserRequest';
   showModal(`
     <div class="modal-header"><h3>工单流转 · ${escapeHtml(cur.ref)}</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
     <div class="modal-body">
@@ -1402,23 +1439,33 @@ function itopApplyStimulusGo() {
       <div id="resolveFields" style="display:none">
         <div class="form-row"><label>解决方式 *</label>
           <select id="resolutionCode">
-            <option value="solved">已解决</option>
-            <option value="workaround">临时方案</option>
-            <option value="not_reproducible">无法重现</option>
-            <option value="not_support">不支持</option>
-            <option value="rejected">已拒绝</option>
-            <option value="other">其他</option>
+            ${isUr ? '<option value="assistance">日常运维</option>'
+                   : '<option value="1">远程解决</option><option value="2">现场解决</option>'}
           </select></div>
         <div class="form-row"><label>解决方案 *</label><textarea id="solution" style="min-height:60px"></textarea></div>
-        <div class="form-row"><label>难度等级 *</label>
+        ${isUr ? '' : `<div class="form-row"><label>难度等级 *</label>
           <select id="difficultyLevel">
-            <option value="1">1 - 简单</option>
-            <option value="2">2 - 中等</option>
-            <option value="3">3 - 复杂</option>
-          </select></div>
+            <option value="1">1 - 简</option>
+            <option value="2">2 - 中</option>
+            <option value="3">3 - 难</option>
+          </select></div>`}
+      </div>
+      <div id="pendingFields" style="display:none">
+        <div class="form-row"><label>挂起原因 *</label><textarea id="pendingReason" style="min-height:60px" placeholder="如：等待用户反馈 / 等待供应商 / 等待变更窗口..."></textarea></div>
+      </div>
+      <div id="assignFields" style="display:none">
+        <p class="ai-hint">指派需填写以下字段（已预填工单当前值，可修改）：</p>
+        <div class="form-row"><label>处理团队ID *</label><input type="number" id="f_team_id" value="${escapeHtml(raw.team_id || '')}"></div>
+        <div class="form-row"><label>处理工程师ID *</label><input type="number" id="f_agent_id" value="${escapeHtml(raw.agent_id || '')}" placeholder="iTop Person ID"></div>
+        <div class="form-row"><label>服务族ID *</label><input type="number" id="f_servicefamily_id" value="${escapeHtml(raw.servicefamily_id || '')}"></div>
+        <div class="form-row"><label>服务ID *</label><input type="number" id="f_service_id" value="${escapeHtml(raw.service_id || '')}"></div>
+      </div>
+      <div id="itopExtraFields" style="display:none">
+        <p class="ai-hint" id="itopExtraHint"></p>
+        <div id="itopExtraList"></div>
       </div>
       <div class="form-row"><label>备注（可选）</label><textarea id="itopStimComment" style="min-height:60px"></textarea></div>
-      <p class="ai-hint">动作是否可用由 iTop 当前状态（${itopStatusText(cur.status)}）决定，失败时会提示原因。</p>
+      <p class="ai-hint">动作是否可用由 iTop 当前状态（${itopStatusText(cur.status)}）决定；若 iTop 要求补充必填字段，会在此弹窗中动态出现。</p>
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">取消</button>
@@ -1430,10 +1477,22 @@ function itopApplyStimulusGo() {
 
 function onStimulusChange() {
   const stim = document.getElementById('itopStimulus').value;
-  const resolveFields = document.getElementById('resolveFields');
-  if (resolveFields) {
-    resolveFields.style.display = (stim === 'ev_resolve') ? 'block' : 'none';
-  }
+  const show = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? 'block' : 'none'; };
+  show('resolveFields', stim === 'ev_resolve');
+  show('pendingFields', stim === 'ev_pending');
+  show('assignFields', stim === 'ev_assign' || stim === 'ev_reassign');
+}
+
+// v29.0 iTop 返回缺失必填字段时，动态渲染补填输入框
+function renderStimulusExtraFields(needFields) {
+  const box = document.getElementById('itopExtraFields');
+  const list = document.getElementById('itopExtraList');
+  if (!box || !list || !Array.isArray(needFields) || !needFields.length) return;
+  document.getElementById('itopExtraHint').textContent = 'iTop 要求补充以下必填字段（' + needFields.map(itopFieldLabel).join('、') + '），请填写后重新提交：';
+  list.innerHTML = needFields.map(fid => `
+    <div class="form-row"><label>${escapeHtml(itopFieldLabel(fid))} *</label>${itopFieldInput(fid, '')}</div>`).join('');
+  box.style.display = 'block';
+  box.scrollIntoView({behavior: 'smooth', block: 'center'});
 }
 
 async function itopSubmitStimulus() {
@@ -1441,18 +1500,56 @@ async function itopSubmitStimulus() {
   if (!cur) return;
   const stim = document.getElementById('itopStimulus').value;
   const cmt = document.getElementById('itopStimComment').value.trim();
-  const body = { stimulus: stim, comment: cmt || 'infra-workbench v28' };
+  const body = { stimulus: stim, comment: cmt || 'infra-workbench v29' };
+  const fields = {};
+  const val = id => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
   if (stim === 'ev_resolve') {
-    const rc = document.getElementById('resolutionCode').value;
-    const sol = document.getElementById('solution').value.trim();
-    const dl = document.getElementById('difficultyLevel').value;
+    const sol = val('solution');
     if (!sol) { alert('请填写解决方案'); return; }
-    body.fields = { resolution_code: rc, solution: sol, difficulty_level: parseInt(dl) };
+    fields.resolution_code = val('resolutionCode');
+    fields.solution = sol;
+    const dlEl = document.getElementById('difficultyLevel');
+    if (dlEl) fields.difficulty_level = parseInt(dlEl.value);
+  } else if (stim === 'ev_pending') {
+    const pr = val('pendingReason');
+    if (!pr) { alert('请填写挂起原因'); return; }
+    fields.pending_reason = pr;
+  } else if (stim === 'ev_assign' || stim === 'ev_reassign') {
+    ['team_id', 'agent_id', 'servicefamily_id', 'service_id'].forEach(fid => {
+      const v = val('f_' + fid);
+      if (v) fields[fid] = parseInt(v);
+    });
   }
+  // v29.0 合并动态补填字段（iTop need_fields 渲染的输入框 xf_xxx）
+  document.querySelectorAll('#itopExtraList [id^="xf_"]').forEach(el => {
+    const fid = el.id.substring(3);
+    const v = el.value.trim();
+    if (v === '') return;
+    fields[fid] = (fid.endsWith('_id') || fid === 'difficulty_level') ? parseInt(v) : v;
+  });
+  if (Object.keys(fields).length) body.fields = fields;
   try {
-    await api(`/api/itop/tickets/${cur.cls}/${cur.ref}/stimulus`, {method:'POST', body: JSON.stringify(body)});
+    const res = await fetch(`/api/itop/tickets/${cur.cls}/${cur.ref}/stimulus`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      credentials: 'same-origin',
+      body: JSON.stringify(body)
+    });
+    if (res.status === 401) { location.reload(); return; }
+    const data = await res.json();
+    if (!res.ok) {
+      // v29.0 iTop 缺必填字段 → 弹窗动态补填
+      if (data.need_fields && data.need_fields.length) {
+        renderStimulusExtraFields(data.need_fields);
+        alert(data.error || '请补充必填字段');
+        return;
+      }
+      throw new Error(data.error || '请求失败');
+    }
     closeModal();
-    alert('流转成功');
+    const st = (data.result && data.result[0] && data.result[0].status) ? data.result[0].status : '';
+    alert('流转成功' + (st ? '，新状态：' + itopStatusText(st) : ''));
+    showItopTicketModal(cur.cls, cur.ref);
     loadItopTickets();
   } catch(err) { alert('流转失败：' + err.message); }
 }

@@ -6230,6 +6230,15 @@ def list_knowledge():
 ITOP_MCP_URL = os.environ.get('ITOP_MCP_URL', 'http://YOUR_SERVER_IP:8003/mcp')
 ITOP_CLASSES = ('UserRequest', 'Incident', 'Problem', 'Change')
 ITOP_CLOSED_STATUSES = ('resolved', 'closed', 'reject')
+# v29.0 工单流转可提交字段白名单（各工单类字段不同，iTop 端会二次校验）
+ITOP_STIMULUS_FIELD_WHITELIST = frozenset({
+    'resolution_code', 'solution', 'difficulty_level', 'pending_reason',
+    'team_id', 'agent_id', 'servicefamily_id', 'service_id', 'servicesubcategory_id',
+    'caller_id', 'org_id', 'approver_id', 'receiver_id', 'time_spent',
+    'user_satisfaction', 'user_comment', 'return_reason', 'assigne_reason',
+    'withdraw_reason', 'notes', 'comment', 'handling_method', 'is_repair',
+    'symptom', 'repair_notes', 'resolution_date', 'close_date',
+})
 _ITOP_MARK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 
 _itop_mcp = None
@@ -6703,13 +6712,46 @@ def itop_ticket_apply_stimulus(cls, ref):
         key = int(row['ticket_key'] or 0)
         if not key:
             return jsonify({'error': '工单缺少 iTop key，无法写回'}), 400
-        args = {'iop_class': cls, 'key': key, 'stimulus': stimulus,
-                'comment': (data.get('comment') or 'infra-workbench v27')}
+        # v29.0 流转字段白名单（防误传/注入未知字段；iTop 各工单类字段不同）
         fields = data.get('fields')
-        if isinstance(fields, dict) and fields:
-            args['fields'] = fields
+        if isinstance(fields, dict):
+            fields = {k: v for k, v in fields.items() if k in ITOP_STIMULUS_FIELD_WHITELIST}
+        else:
+            fields = {}
         client = _get_itop_client()
-        res = client.call_json('apply_stimulus', args)
+        res, last_err = None, None
+        for _attempt in range(3):
+            args = {'iop_class': cls, 'key': key, 'stimulus': stimulus,
+                    'comment': (data.get('comment') or 'infra-workbench v29')}
+            if fields:
+                args['fields'] = fields
+            try:
+                res = client.call_json('apply_stimulus', args)
+                break
+            except Exception as e:
+                msg = str(e)
+                # v29.0 工单类型字段差异自适应：剔除该类型不存在的字段后自动重试
+                # iTop 报错格式 "difficulty_level: Unknown attribute"（字段在前），兼容反向格式
+                m = (re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*:\s*Unknown attribute", msg)
+                     or re.search(r"Unknown attribute\s*:\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)", msg))
+                if m and m.group(1) in fields:
+                    fields.pop(m.group(1))
+                    last_err = msg
+                    continue
+                # v29.0 必填字段动态感知：返回缺失字段清单，前端弹窗动态渲染补填
+                m2 = re.search(r"Missing mandatory attribute\(s\)[^:]*:\s*(.+?)\.?\s*$", msg)
+                if m2:
+                    need = [x.strip() for x in m2.group(1).split(',') if x.strip()]
+                    return jsonify({'ok': False, 'need_fields': need,
+                                    'error': 'iTop 要求补充以下必填字段后才能执行该流转：%s' % '、'.join(need)}), 400
+                # v29.0 状态不匹配转友好提示
+                m3 = re.search(r"Invalid stimulus: '(\w+)' on the object (\S+) in state '(\w+)'", msg)
+                if m3:
+                    return jsonify({'error': "工单当前状态「%s」不支持流转动作「%s」，请在 iTop 中核对可用操作"
+                                    % (m3.group(3), m3.group(1))}), 400
+                return jsonify({'error': 'iTop 流转失败：%s' % msg}), 502
+        if res is None:
+            return jsonify({'error': 'iTop 流转失败：%s' % (last_err or '未知错误')}), 502
         _refresh_itop_ticket(cls, ref)
         return jsonify({'ok': True, 'result': res})
     except Exception as e:
