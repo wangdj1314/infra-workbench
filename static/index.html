@@ -611,7 +611,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="login-card">
     <div class="login-logo">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <h1>基础架构工作台 <span class="version-badge">v28.8</span></h1>
+      <h1>基础架构工作台 <span class="version-badge">v28.9</span></h1>
       <p>Infrastructure Team Workbench</p>
     </div>
     <div id="loginError" class="login-error hidden"></div>
@@ -636,7 +636,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="topbar">
     <div class="topbar-left">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" style="width:22px;height:22px"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v28.8">v28.8</span>
+      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v28.9">v28.9</span>
     </div>
     <div class="topbar-right">
       <div class="ai-token-badge" onclick="switchTab('apikey')" title="AI Token 消耗">
@@ -1398,7 +1398,25 @@ function itopApplyStimulusGo() {
     <div class="modal-header"><h3>工单流转 · ${escapeHtml(cur.ref)}</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
     <div class="modal-body">
       <div class="form-row"><label>流转动作</label>
-        <select id="itopStimulus">${ITOP_STIMULUS_OPTS.map(o => `<option value="${o[0]}">${o[1]}（${o[0]}）</option>`).join('')}</select></div>
+        <select id="itopStimulus" onchange="onStimulusChange()">${ITOP_STIMULUS_OPTS.map(o => `<option value="${o[0]}">${o[1]}（${o[0]}）</option>`).join('')}</select></div>
+      <div id="resolveFields" style="display:none">
+        <div class="form-row"><label>解决方式 *</label>
+          <select id="resolutionCode">
+            <option value="solved">已解决</option>
+            <option value="workaround">临时方案</option>
+            <option value="not_reproducible">无法重现</option>
+            <option value="not_support">不支持</option>
+            <option value="rejected">已拒绝</option>
+            <option value="other">其他</option>
+          </select></div>
+        <div class="form-row"><label>解决方案 *</label><textarea id="solution" style="min-height:60px"></textarea></div>
+        <div class="form-row"><label>难度等级 *</label>
+          <select id="difficultyLevel">
+            <option value="1">1 - 简单</option>
+            <option value="2">2 - 中等</option>
+            <option value="3">3 - 复杂</option>
+          </select></div>
+      </div>
       <div class="form-row"><label>备注（可选）</label><textarea id="itopStimComment" style="min-height:60px"></textarea></div>
       <p class="ai-hint">动作是否可用由 iTop 当前状态（${itopStatusText(cur.status)}）决定，失败时会提示原因。</p>
     </div>
@@ -1407,6 +1425,15 @@ function itopApplyStimulusGo() {
       <button class="btn btn-primary-sm" onclick="itopSubmitStimulus()">执行流转</button>
     </div>
   `);
+  onStimulusChange();
+}
+
+function onStimulusChange() {
+  const stim = document.getElementById('itopStimulus').value;
+  const resolveFields = document.getElementById('resolveFields');
+  if (resolveFields) {
+    resolveFields.style.display = (stim === 'ev_resolve') ? 'block' : 'none';
+  }
 }
 
 async function itopSubmitStimulus() {
@@ -1414,9 +1441,16 @@ async function itopSubmitStimulus() {
   if (!cur) return;
   const stim = document.getElementById('itopStimulus').value;
   const cmt = document.getElementById('itopStimComment').value.trim();
+  const body = { stimulus: stim, comment: cmt || 'infra-workbench v28' };
+  if (stim === 'ev_resolve') {
+    const rc = document.getElementById('resolutionCode').value;
+    const sol = document.getElementById('solution').value.trim();
+    const dl = document.getElementById('difficultyLevel').value;
+    if (!sol) { alert('请填写解决方案'); return; }
+    body.fields = { resolution_code: rc, solution: sol, difficulty_level: parseInt(dl) };
+  }
   try {
-    await api(`/api/itop/tickets/${cur.cls}/${cur.ref}/stimulus`, {method:'POST', body: JSON.stringify({
-      stimulus: stim, comment: cmt})});
+    await api(`/api/itop/tickets/${cur.cls}/${cur.ref}/stimulus`, {method:'POST', body: JSON.stringify(body)});
     closeModal();
     alert('流转成功');
     loadItopTickets();
