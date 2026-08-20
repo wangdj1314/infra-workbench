@@ -35,7 +35,10 @@ from ldap3 import Server, Connection, ALL
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__, static_folder='static', static_url_path='')
-app.secret_key = os.environ.get('SECRET_KEY', 'YOUR_SECRET_KEY_HERE')
+app.secret_key = os.environ.get('SECRET_KEY', '')
+if not app.secret_key or 'YOUR_SECRET_KEY' in app.secret_key:
+    # v29.1：fail-fast，避免占位符/缺失 SECRET_KEY 导致 session 可被伪造
+    raise RuntimeError('SECRET_KEY 未配置或仍为占位符，拒绝启动')
 app.permanent_session_lifetime = 86400  # 24h
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB upload limit
 
@@ -306,7 +309,30 @@ def _mark_daily_sync_done():
         pass
 
 
+_SCHED_LOCK_CONN = None  # 持有命名锁的专用连接（连接存活期间锁持续有效）
+
+
+def _acquire_scheduler_lock():
+    """v29.1：gunicorn 多 worker 防重 —— 用 MySQL 命名锁选主，
+    仅抢到锁的实例进入调度循环；进程退出/连接断开时锁自动释放，
+    另一 worker 在下一次尝试中接管。"""
+    global _SCHED_LOCK_CONN
+    while True:
+        try:
+            conn = sqlite3.connect()
+            got = conn.execute("SELECT GET_LOCK('infra_workbench_scheduler', 0) as got").fetchone()['got']
+            if int(got or 0) == 1:
+                _SCHED_LOCK_CONN = conn  # 保持连接存活即持锁
+                print('[scheduler] 已获取调度锁，本实例负责周期任务')
+                return
+            conn.close()
+        except Exception as e:
+            print(f'[scheduler] 抢锁异常: {e}')
+        time.sleep(30)
+
+
 def scheduler_loop():
+    _acquire_scheduler_lock()
     while True:
         try:
             conn = sqlite3.connect()
@@ -4979,9 +5005,10 @@ def _mcp_call_tool(user_id, tool_name, args, token_prefix=''):
             pending = db.execute("SELECT COUNT(*) as c FROM work_items WHERE user_id=? AND status!='completed'", (user_id,)).fetchone()['c']
             overdue = db.execute("SELECT COUNT(*) as c FROM work_items WHERE user_id=? AND status!='completed' AND due_date!='' AND due_date < ?", (user_id, today)).fetchone()['c']
             avg = db.execute("SELECT AVG(actual_duration_minutes) as avg FROM work_items WHERE user_id=? AND status='completed' AND actual_duration_minutes>0", (user_id,)).fetchone()['avg'] or 0
+            # v29.1：MySQL AVG() 返回 Decimal，json.dumps 无法序列化，统一转 float
             return {'content': [{'type': 'text', 'text': json.dumps({
                 'total': total, 'completed': completed, 'pending': pending, 'overdue': overdue,
-                'avg_duration_minutes': round(avg, 1)
+                'avg_duration_minutes': round(float(avg), 1)
             }, ensure_ascii=False)}]}
 
         if tool_name == 'get_user_knowledge':

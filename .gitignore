@@ -1,12 +1,8 @@
+data/
 __pycache__/
 *.pyc
-data/*.db
-data/*.db-journal
-data/*.db-wal
-data/last_daily_sync.txt
 .env
-*.egg-info/
-dist/
-build/
-.venv/
-data/uploads/
+*.bak*
+backup_*/
+*.db
+__pycache__/
