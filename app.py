@@ -41,6 +41,9 @@ if not app.secret_key or 'YOUR_SECRET_KEY' in app.secret_key:
     # v29.1：fail-fast，避免占位符/缺失 SECRET_KEY 导致 session 可被伪造
     raise RuntimeError('SECRET_KEY 未配置或仍为占位符，拒绝启动')
 app.permanent_session_lifetime = 86400  # 24h
+# v29.3：显式声明会话 Cookie 安全属性（防 CSRF 与脚本窃读，不依赖浏览器默认行为）
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB upload limit
 
 @app.after_request
@@ -499,8 +502,13 @@ LOGIN_LOCK_SECONDS = 900
 
 
 def _login_client_ip():
-    xff = request.headers.get('X-Forwarded-For', '')
-    return (xff.split(',')[0].strip() if xff else '') or request.remote_addr or ''
+    # v29.3：默认只信任 TCP 对端 IP，避免攻击者伪造 X-Forwarded-For 绕过登录限速；
+    # 仅当部署在可信反向代理之后（TRUST_PROXY=1）才取 XFF 首段
+    if os.environ.get('TRUST_PROXY') == '1':
+        xff = request.headers.get('X-Forwarded-For', '')
+        if xff:
+            return xff.split(',')[0].strip()
+    return request.remote_addr or ''
 
 
 def _login_locked_seconds(ip, username):

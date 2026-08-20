@@ -2,6 +2,14 @@
 
 版本规则：主版本号跟随年份迭代（v25.x → v26.0），功能变更在本文件登记。
 
+## v29.3（2026-08-20）
+
+### 安全：二次代码审计发现的 4 项修复
+- **前端存储型 XSS（onclick 内联属性）**：4 处 `onclick="fn('${escapeHtml(x)}')"` 模式中，`&#39;` 会被浏览器解码还原为 `'` 再交给 JS，转义失效；新增 `jsStr()`（JSON.stringify + escapeHtml 双重防护）并替换 iTop 工程师姓名、板块名、MCP Token 标签 4 处插值
+- **iframe 磁贴 sandbox 失效**：工具磁贴 iframe 的 `allow-scripts + allow-same-origin` 组合允许 iframe 自行移除 sandbox 属性，等同无沙箱；移除 allow-same-origin
+- **登录限速 XFF 伪造绕过**：`_login_client_ip` 不再无条件信任 X-Forwarded-For，默认取 TCP 对端 IP；仅 `TRUST_PROXY=1` 时才取 XFF 首段
+- **会话 Cookie 属性显式化**：新增 `SESSION_COOKIE_HTTPONLY=True`、`SESSION_COOKIE_SAMESITE='Lax'`，不再依赖浏览器默认行为
+
 ## v29.2（2026-08-20）
 
 ### 安全：代码审查发现的 5 项中危漏洞修复

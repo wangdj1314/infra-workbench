@@ -611,7 +611,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="login-card">
     <div class="login-logo">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <h1>基础架构工作台 <span class="version-badge">v29.2</span></h1>
+      <h1>基础架构工作台 <span class="version-badge">v29.3</span></h1>
       <p>Infrastructure Team Workbench</p>
     </div>
     <div id="loginError" class="login-error hidden"></div>
@@ -636,7 +636,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="topbar">
     <div class="topbar-left">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" style="width:22px;height:22px"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v29.2">v29.2</span>
+      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v29.3">v29.3</span>
     </div>
     <div class="topbar-right">
       <div class="ai-token-badge" onclick="switchTab('apikey')" title="AI Token 消耗">
@@ -1583,7 +1583,7 @@ async function loadItopUserMap() {
     const rows = maps.map(m => `<tr>
         <td>${escapeHtml(m.itop_agent_name)}</td>
         <td>${escapeHtml(m.display_name || ('用户#' + m.user_id))}</td>
-        <td><button class="btn btn-sm" onclick="itopClearMap('${escapeHtml(m.itop_agent_name)}')">清除</button></td>
+        <td><button class="btn btn-sm" onclick="itopClearMap(${jsStr(m.itop_agent_name)})">清除</button></td>
       </tr>`).join('');
     document.getElementById('itopUserMap').innerHTML = `
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
@@ -1605,7 +1605,7 @@ async function itopSearchAgents() {
     const d = await api('/api/itop/user-map?q=' + encodeURIComponent(q));
     const agents = d.agents || [];
     document.getElementById('itopAgentResults').innerHTML = agents.length
-      ? agents.map(a => `<button class="filter-btn" style="cursor:pointer;${itopSelectedAgent === a.agent_name ? 'background:var(--primary);color:#fff' : ''}" onclick="itopPickAgent('${escapeHtml(a.agent_name)}')">${escapeHtml(a.agent_name)}（${a.c}张）</button>`).join(' ')
+      ? agents.map(a => `<button class="filter-btn" style="cursor:pointer;${itopSelectedAgent === a.agent_name ? 'background:var(--primary);color:#fff' : ''}" onclick="itopPickAgent(${jsStr(a.agent_name)})">${escapeHtml(a.agent_name)}（${a.c}张）</button>`).join(' ')
       : '<span class="ai-hint">无匹配工程师</span>';
   } catch(err) { alert('搜索失败：' + err.message); }
 }
@@ -3011,7 +3011,8 @@ function openWidget(kind, id) {
   if (kind === 'iframe' && id) {
     const w = (widgetsCache.custom || []).find(x => x.id === id);
     if (w && w.url) {
-      openWidgetModal(w.title || '工具', `<iframe src="${escapeHtml(w.url)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>`);
+      // v29.3：sandbox 去掉 allow-same-origin —— 与 allow-scripts 同开时 iframe 可自行移除 sandbox 属性，等同于无沙箱
+      openWidgetModal(w.title || '工具', `<iframe src="${escapeHtml(w.url)}" sandbox="allow-scripts allow-forms allow-popups"></iframe>`);
       return;
     }
   }
@@ -3975,7 +3976,7 @@ function _renderAreaList(areas, elId) {
   el.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:8px">' + areas.map(a => `
     <div style="display:flex;align-items:center;gap:6px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:13px">
       <span>${escapeHtml(a.name)}</span>
-      <button class="btn btn-sm" style="padding:2px 6px;font-size:11px" onclick="showEditAreaModal(${a.id}, '${escapeHtml(a.name)}')">编辑</button>
+      <button class="btn btn-sm" style="padding:2px 6px;font-size:11px" onclick="showEditAreaModal(${a.id}, ${jsStr(a.name)})">编辑</button>
       <button class="btn btn-sm btn-danger-sm" style="padding:2px 6px;font-size:11px" onclick="deleteArea(${a.id})">删除</button>
     </div>
   `).join('') + '</div>';
@@ -4230,7 +4231,7 @@ function renderMcpConfig() {
       <td style="font-family:monospace;font-size:12px">${escapeHtml(t.token_masked)}</td>
       <td style="font-size:12px;color:var(--muted)">${(t.created_at || '').substring(0, 16)}</td>
       <td style="font-size:12px;color:var(--muted)">${t.last_used_at ? t.last_used_at.substring(0, 16) : '未使用'}</td>
-      <td><button class="btn btn-sm btn-danger-sm" style="padding:2px 8px;font-size:11px" onclick="deleteMcpToken(${t.id}, '${escapeHtml(t.label || '默认')}')">吊销</button></td>
+      <td><button class="btn btn-sm btn-danger-sm" style="padding:2px 8px;font-size:11px" onclick="deleteMcpToken(${t.id}, ${jsStr(t.label || '默认')})">吊销</button></td>
     </tr>`).join('');
   el.innerHTML = `
     <div class="sb-stat-row" style="margin-bottom:8px"><span>状态</span><span class="sb-stat-val" style="color:var(--success)">已启用</span></div>
@@ -5372,6 +5373,11 @@ function switchHelpSection(sec) {
 function escapeHtml(s) {
   if (!s) return '';
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+// v29.3：onclick 等内联属性传参专用 —— JSON.stringify 生成 JS 字符串字面量后再做 HTML 转义。
+// 只用 escapeHtml 时，&#39; 会被浏览器解码还原成 ' 再交给 JS，导致引号注入；此函数双重防护。
+function jsStr(s) {
+  return escapeHtml(JSON.stringify(String(s == null ? '' : s)));
 }
 
 // ---- v28.1 组织架构管理 ----
