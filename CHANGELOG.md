@@ -2,6 +2,23 @@
 
 版本规则：主版本号跟随年份迭代（v25.x → v26.0），功能变更在本文件登记。
 
+## v29.2（2026-08-20）
+
+### 安全：代码审查发现的 5 项中危漏洞修复
+- **子管理员横向越权**：`/api/team/<id>/details`、`/analysis`、`/job-analysis` 三个路由此前仅判 is_admin，子管理员可查任意员工；现按 `_can_view_user` 鉴权（本人 / 全局管理员 / 目标所在团队的子管理员）
+- **SSRF（favicon 代理）**：新增 `_validate_icon_url` —— 仅 http(s)，解析后 IP 拒绝环回/链路本地（169.254 元数据）/多播/保留段（内网业务地址保留放行）；禁跳转防绕过；响应体限 512KB
+- **LDAP 注入**：登录与 AD 同步的用户名均改用 ldap3 `escape_filter_chars` 转义；登录接口增加 sAMAccountName 字符集白名单校验
+- **MCP token 泄露到 URL**：SSE `event: endpoint` 不再拼入 token，改由 sessionId 会话凭据鉴权（会话目录写入 uid，会话结束/超 1h 自动失效）；旧客户端带 `?token=` 的调用双向兼容
+- **登录限速**：同 IP+用户名连续失败 5 次锁定 15 分钟（429）；内存态，每 gunicorn worker 独立计数
+
+## v29.1（2026-08-20）
+
+### 修复：线上 Decimal 500 与调度器防重
+- **Decimal JSON 序列化**：`get_stats` 中 MySQL `AVG()` 返回 Decimal 导致 `/mcp/message` 报 `TypeError: Object of type Decimal is not JSON serializable`，统一转 float
+- **调度器多实例防重**：gunicorn 2 worker 各起一个 scheduler，现用 MySQL 命名锁（`GET_LOCK`）选主，仅抢到锁的实例运行周期任务，进程退出自动接管
+- **SECRET_KEY fail-fast**：未配置或仍为占位符时拒绝启动
+- **部署规范**：生产敏感配置从 docker-compose.yml 拆至 `.env`（env_file 引用，600 权限，git 忽略）
+
 ## v29.0（2026-08-19）
 
 ### 修复：iTop 工单流转与日志全链路（重大重构）

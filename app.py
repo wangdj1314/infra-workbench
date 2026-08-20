@@ -32,6 +32,7 @@ from flask import (
     send_file, abort, Response, stream_with_context
 )
 from ldap3 import Server, Connection, ALL
+from ldap3.utils.conv import escape_filter_chars  # v29.2：LDAP 过滤器转义，防注入
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__, static_folder='static', static_url_path='')
@@ -409,7 +410,8 @@ def ldap_authenticate(username, password):
         try:
             conn.search(
                 search_base=LDAP_BASE,
-                search_filter=f'(&(objectClass=user)(sAMAccountName={username}))',
+                # v29.2：转义特殊字符，防止 LDAP 过滤器注入
+                search_filter=f'(&(objectClass=user)(sAMAccountName={escape_filter_chars(username)}))',
                 attributes=['displayName', 'cn', 'mail', 'userPrincipalName']
             )
             if conn.entries:
@@ -474,6 +476,61 @@ def get_admin_scope():
     if session.get('is_super'):
         return None  # v28.3：主管理员始终全局
     return session.get('team_id')  # None = 全局管理员, int = 团队子管理员
+
+
+def _can_view_user(target_user):
+    """v29.2：员工数据查看鉴权 —— 本人 / 全局管理员 / 目标所在团队的子管理员。
+    修复此前子管理员（team_id=X）可越权查看任意员工详情的横向越权问题。"""
+    if target_user['id'] == session['user_id']:
+        return True
+    if not session.get('is_admin'):
+        return False
+    scope = get_admin_scope()
+    if scope is None:
+        return True  # 主管理员 / 全局管理员
+    return dict(target_user).get('team_id') == scope
+
+
+# v29.2：登录限速 —— 同 IP+用户名连续失败 5 次锁定 15 分钟（内存态，每 gunicorn worker 独立）
+_LOGIN_LOCK = threading.Lock()
+_LOGIN_STATE = {}  # 'ip|username' -> {'fails': int, 'until': ts}
+LOGIN_MAX_FAILS = 5
+LOGIN_LOCK_SECONDS = 900
+
+
+def _login_client_ip():
+    xff = request.headers.get('X-Forwarded-For', '')
+    return (xff.split(',')[0].strip() if xff else '') or request.remote_addr or ''
+
+
+def _login_locked_seconds(ip, username):
+    key = f'{ip}|{username}'
+    with _LOGIN_LOCK:
+        st = _LOGIN_STATE.get(key)
+        if st and st.get('until', 0) > time.time():
+            return int(st['until'] - time.time())
+    return 0
+
+
+def _login_record_fail(ip, username):
+    key = f'{ip}|{username}'
+    with _LOGIN_LOCK:
+        st = _LOGIN_STATE.setdefault(key, {'fails': 0, 'until': 0})
+        st['fails'] += 1
+        if st['fails'] >= LOGIN_MAX_FAILS:
+            st['until'] = time.time() + LOGIN_LOCK_SECONDS
+            st['fails'] = 0
+        # 条目过多时顺手清理已过锁定期且无失败计数的记录
+        if len(_LOGIN_STATE) > 2000:
+            now = time.time()
+            for k in [k for k, v in _LOGIN_STATE.items()
+                      if v.get('until', 0) + LOGIN_LOCK_SECONDS < now and v['fails'] == 0]:
+                _LOGIN_STATE.pop(k, None)
+
+
+def _login_record_ok(ip, username):
+    with _LOGIN_LOCK:
+        _LOGIN_STATE.pop(f'{ip}|{username}', None)
 
 
 def api_key_required(f):
@@ -861,9 +918,21 @@ def login():
     if not username or not password:
         return jsonify({'error': '请输入用户名和密码'}), 400
 
+    # v29.2：用户名字符集白名单（AD sAMAccountName 合法字符），非法输入直接拒绝
+    if not re.fullmatch(r'[A-Za-z0-9._-]{1,64}', username):
+        return jsonify({'error': '用户名不合法'}), 400
+
+    # v29.2：登录限速 —— 连续失败锁定，防暴力破解
+    ip = _login_client_ip()
+    locked = _login_locked_seconds(ip, username)
+    if locked > 0:
+        return jsonify({'error': f'连续失败次数过多，请 {locked // 60 + 1} 分钟后再试'}), 429
+
     ok, display_name = ldap_authenticate(username, password)
     if not ok:
+        _login_record_fail(ip, username)
         return jsonify({'error': 'LDAP 认证失败，请检查用户名和密码'}), 401
+    _login_record_ok(ip, username)
 
     db = get_db()
     user = db.execute('SELECT * FROM users WHERE ad_username = ?', (username,)).fetchone()
@@ -1043,7 +1112,7 @@ def admin_users_sync_ad():
         for i in range(0, len(ads), 50):
             batch = ads[i:i + 50]
             flt = '(&(objectClass=user)(|' + ''.join(
-                '(sAMAccountName=%s)' % a for a in batch) + '))'
+                '(sAMAccountName=%s)' % escape_filter_chars(a) for a in batch) + '))'
             conn.search(search_base=LDAP_BASE, search_filter=flt,
                         attributes=['sAMAccountName', 'displayName', 'employeeID', 'title', 'mail'])
             for e in conn.entries:
@@ -1250,8 +1319,8 @@ def team_member_details(user_id):
     if not user:
         return jsonify({'error': '用户不存在'}), 404
 
-    # 非管理员只能看自己
-    if not session.get('is_admin') and user_id != session['user_id']:
+    # v29.2：本人 / 全局管理员 / 本团队子管理员（修复子管理员跨团队越权）
+    if not _can_view_user(user):
         return jsonify({'error': '无权查看'}), 403
 
     today = date.today().isoformat()
@@ -1317,7 +1386,8 @@ def team_member_analysis(user_id):
     user = db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
     if not user:
         return jsonify({'error': '用户不存在'}), 404
-    if not session.get('is_admin') and user_id != session['user_id']:
+    # v29.2：本人 / 全局管理员 / 本团队子管理员（修复子管理员跨团队越权）
+    if not _can_view_user(user):
         return jsonify({'error': '无权操作'}), 403
 
     today = date.today().isoformat()
@@ -1391,7 +1461,8 @@ def team_member_job_analysis(user_id):
     user = db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
     if not user:
         return jsonify({'error': '用户不存在'}), 404
-    if not session.get('is_admin') and user_id != session['user_id']:
+    # v29.2：本人 / 全局管理员 / 本团队子管理员（修复子管理员跨团队越权）
+    if not _can_view_user(user):
         return jsonify({'error': '无权操作'}), 403
 
     job_desc = (dict(user).get('job_description') or '').strip()
@@ -2361,12 +2432,53 @@ import re as _re
 _FAVICON_CACHE = '/app/data/favicons'
 
 
-def _try_fetch_icon_bytes(url):
+def _validate_icon_url(url):
+    """v29.2：SSRF 防护 —— 仅 http(s)，且解析后的 IP 不得为环回/链路本地/元数据等敏感地址
+    （内网业务地址保留放行）；校验通过返回 urlparse 结果，否则 None"""
+    import socket, ipaddress
+    from urllib.parse import urlparse
     try:
-        resp = requests.get(url, timeout=4, headers={'User-Agent': 'Mozilla/5.0'})
+        u = urlparse(url)
+    except Exception:
+        return None
+    if u.scheme not in ('http', 'https') or not u.hostname:
+        return None
+    try:
+        infos = socket.getaddrinfo(u.hostname, u.port or (443 if u.scheme == 'https' else 80),
+                                   proto=socket.IPPROTO_TCP)
+    except Exception:
+        return None
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return None
+        if ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved:
+            return None
+    return u
+
+
+def _try_fetch_icon_bytes(url):
+    if not _validate_icon_url(url):
+        return None
+    try:
+        # v29.2：禁跳转（防绕过目标校验）+ 限响应体大小
+        resp = requests.get(url, timeout=4, headers={'User-Agent': 'Mozilla/5.0'},
+                            allow_redirects=False, stream=True)
         ctype = resp.headers.get('Content-Type', '')
-        if resp.status_code == 200 and resp.content and 'text/html' not in ctype:
-            return resp.content
+        if resp.status_code != 200 or 'text/html' in ctype:
+            resp.close()
+            return None
+        chunks, size = [], 0
+        for chunk in resp.iter_content(8192):
+            size += len(chunk)
+            if size > 512 * 1024:  # 图标不应超过 512KB
+                resp.close()
+                return None
+            chunks.append(chunk)
+        resp.close()
+        data = b''.join(chunks)
+        return data or None
     except Exception:
         pass
     return None
@@ -2374,12 +2486,18 @@ def _try_fetch_icon_bytes(url):
 
 def _fetch_page_icon(page_url, host):
     """解析页面 <link rel=icon>，兜底 Google favicon 服务（仅外网域名）"""
+    if not _validate_icon_url(page_url):  # v29.2：SSRF 防护
+        return None
     try:
         resp = requests.get(page_url, timeout=5,
-                            headers={'User-Agent': 'Mozilla/5.0'}, verify=False)
+                            headers={'User-Agent': 'Mozilla/5.0'}, verify=False,
+                            allow_redirects=False, stream=True)
         if resp.status_code != 200:
+            resp.close()
             return None
-        m = _re.search(r'<link[^>]+rel=["\']?(?:shortcut\s+)?icon["\']?[^>]*>', resp.text, _re.I)
+        text = resp.raw.read(512 * 1024, decode_content=True).decode('utf-8', 'ignore')
+        resp.close()
+        m = _re.search(r'<link[^>]+rel=["\']?(?:shortcut\s+)?icon["\']?[^>]*>', text, _re.I)
         if m:
             href_m = _re.search(r'href=["\']([^"\']+)["\']', m.group(0), _re.I)
             if href_m:
@@ -2413,6 +2531,8 @@ def favicon_proxy():
         return jsonify({'error': 'URL 解析失败'}), 400
     if not host:
         return jsonify({'error': 'URL 缺少域名'}), 400
+    if not _validate_icon_url(url):  # v29.2：SSRF 防护（环回/链路本地/元数据地址拒绝）
+        return jsonify({'error': 'URL 不合法'}), 400
     os.makedirs(_FAVICON_CACHE, exist_ok=True)
     cache_path = os.path.join(_FAVICON_CACHE, host.replace('/', '_').replace(':', '_') + '.ico')
     if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
@@ -5036,8 +5156,9 @@ def _mcp_sessions_root():
     return d
 
 
-def _mcp_session_create():
-    """创建新会话目录；顺带清理 1 小时以上的残留会话"""
+def _mcp_session_create(uid=None):
+    """创建新会话目录；顺带清理 1 小时以上的残留会话。
+    v29.2：写入 uid 凭据文件，/mcp/message 可仅凭 sessionId 鉴权（token 不再出现在 URL）"""
     root = _mcp_sessions_root()
     now = time.time()
     try:
@@ -5054,7 +5175,24 @@ def _mcp_session_create():
     sid = uuid.uuid4().hex[:16]
     sdir = os.path.join(root, sid)
     os.makedirs(sdir, exist_ok=True)
+    if uid is not None:
+        try:
+            with open(os.path.join(sdir, 'uid'), 'w') as f:
+                f.write(str(uid))
+        except Exception:
+            pass
     return sid, sdir
+
+
+def _mcp_session_uid(sid):
+    """v29.2：按 sessionId 读取会话属主（严格 hex 格式校验防路径穿越）"""
+    if not sid or not re.fullmatch(r'[0-9a-f]{16}', sid):
+        return None
+    try:
+        with open(os.path.join(_mcp_sessions_root(), sid, 'uid')) as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
 
 
 def _mcp_session_dir(sid):
@@ -5145,7 +5283,8 @@ def mcp_sse():
     """MCP 端点（兼容 SSE transport 与 streamableHttp 探测）
 
     - GET：标准 SSE transport。服务端先发 `event: endpoint` 告知 message URL，
-      客户端随后 POST JSON-RPC 到 /mcp/message?token=xxx，并保持长连接（20s keepalive）。
+      客户端随后 POST JSON-RPC 到 /mcp/message?sessionId=xxx，并保持长连接（20s keepalive）。
+      （v29.2：token 不再拼入 endpoint URL，改由 sessionId 会话凭据鉴权，避免长期令牌泄露到日志）
     - POST：兼容 WorkBuddy 等客户端对端点的 POST 探测/JSON-RPC 直连
       （v22 修复：WorkBuddy 5.3.12 信任后会 POST 本端点，此前 405 导致连接报错）。
     """
@@ -5167,9 +5306,9 @@ def mcp_sse():
     # v26.0：标准 SSE transport —— 每个连接独立会话，POST 的 JSON-RPC 响应
     # 经由本事件流以 event: message 下发（QoderWork 等标准客户端依赖此通道），
     # 跨 gunicorn worker 通过 /app/data/mcp_sessions 文件通道中转
-    sid, sdir = _mcp_session_create()
+    sid, sdir = _mcp_session_create(uid)
     base = request.host_url.rstrip('/')
-    endpoint = f'{base}/mcp/message?token={token}&sessionId={sid}'
+    endpoint = f'{base}/mcp/message?sessionId={sid}'  # v29.2：不再携带 token
 
     def generate():
         import shutil as _sh
@@ -5206,6 +5345,10 @@ def mcp_message():
     """
     token = _mcp_auth_token()
     uid = _mcp_verify_token(token)
+    if not uid:
+        # v29.2：兼容 SSE endpoint 不再携带 token 后的会话凭据鉴权；
+        # 旧客户端带 ?token= 的调用仍走上面的 token 校验，双向兼容
+        uid = _mcp_session_uid(request.args.get('sessionId', ''))
     if not uid:
         return jsonify({'jsonrpc': '2.0', 'error': {'code': -32001, 'message': 'Unauthorized'}, 'id': None}), 401
     resp = _handle_mcp_jsonrpc(uid)
