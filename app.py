@@ -4326,8 +4326,18 @@ def work_logs():
         query += ' WHERE l.user_id = ?'
         params.append(session['user_id'])
     elif user_filter:
+        # v29.4：子管理员须确认目标用户在自己团队作用域内，防止跨团队横向越权
+        target = db.execute('SELECT id, team_id FROM users WHERE id = ?', (user_filter,)).fetchone()
+        if target is None or not _can_view_user(dict(target)):
+            return jsonify({'error': '无权查看该用户的工作日志'}), 403
         query += ' WHERE l.user_id = ?'
         params.append(user_filter)
+    else:
+        # v29.4：子管理员不带过滤条件时只返回本团队日志，防止全量浏览越权
+        scope = get_admin_scope()
+        if scope is not None:
+            query += ' WHERE u.team_id = ?'
+            params.append(scope)
     query += ' ORDER BY l.created_at DESC LIMIT 200'
     logs = db.execute(query, params).fetchall()
     return jsonify([dict(l) for l in logs])
@@ -4646,12 +4656,13 @@ def activity_stats():
     """获取用户活动统计（今日/本周/总计）"""
     db = get_db()
     uid = session.get('user_id')
-    is_admin = session.get('is_admin', False)
     target_uid = request.args.get('user_id', type=int)
-    if target_uid and is_admin:
+    if target_uid and target_uid != uid:
+        # v29.4：查看他人活动统计须通过作用域校验（本人/全局管理员/本团队子管理员）
+        target = db.execute('SELECT id, team_id FROM users WHERE id = ?', (target_uid,)).fetchone()
+        if target is None or not _can_view_user(dict(target)):
+            return jsonify({'error': '无权查看他人活动记录'}), 403
         uid = target_uid
-    elif target_uid and target_uid != uid:
-        return jsonify({'error': '无权查看他人活动记录'}), 403
 
     today = date.today().isoformat()
     week_start = (date.today() - timedelta(days=date.today().weekday())).isoformat()
