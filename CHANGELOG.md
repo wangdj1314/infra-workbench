@@ -5,7 +5,7 @@
 ## v29.6（2026-08-20）
 
 ### 新增：Zabbix 告警清单磁贴（内置小工具）
-- Zabbix 服务端下发 `X-Frame-Options: SAMEORIGIN` 禁止被 iframe 嵌入，改走 **Zabbix JSON-RPC API**：后端新增 `/api/zabbix/problems`（`user.login` 登录态缓存 25 分钟自动重登，兼容新旧版参数名；`problem.get` 拉未恢复告警 + `host.get` 补主机名），需环境变量 `ZABBIX_API_URL` / `ZABBIX_API_USER` / `ZABBIX_API_PASS`（未配置时磁贴提示、路由 503）
+- Zabbix 服务端下发 `X-Frame-Options: SAMEORIGIN` 禁止被 iframe 嵌入，改走 **Zabbix JSON-RPC API**：后端新增 `/api/zabbix/problems`（支持 API Token 或 `user.login` 登录态缓存 25 分钟自动重登，兼容新旧版参数名；`problem.get` 拉未恢复告警，经 `trigger.get selectHosts` 解析主机名——6.0 的 problem/trigger 均无 hostid 字段），需环境变量 `ZABBIX_API_URL` + `ZABBIX_API_TOKEN`（或 `ZABBIX_API_USER`/`ZABBIX_API_PASS`，未配置时磁贴提示、路由 503）
 - 磁贴瓦片显示当前未恢复告警数（≥5 条标红），点击弹层展示告警清单（严重度色点/主机名/时间），条目可点击新窗口直达 Zabbix 问题视图；弹层带手动刷新按钮；添加小工具表单新增「内置：Zabbix 告警清单」类型
 
 ### 新增：iframe 磁贴「兼容嵌入」打开方式
