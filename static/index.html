@@ -266,6 +266,8 @@ input,select,textarea{font-family:inherit;font-size:14px}
 .badge-overdue{background:rgba(248,81,73,.15);color:var(--danger)}
 .badge-due{color:var(--muted);font-size:12px}
 .work-item-desc{font-size:13px;color:var(--muted);margin-top:6px;white-space:pre-wrap}
+.work-item-note{font-size:12px;color:#7ee2a8;background:rgba(63,185,80,.08);border:1px solid rgba(63,185,80,.25);border-radius:6px;padding:6px 10px;margin-top:6px;white-space:pre-wrap;line-height:1.6}
+.work-item-note .note-label{color:var(--success);font-weight:600}
 .work-item-actions{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}
 .work-item.completed .work-item-title{text-decoration:line-through;color:var(--muted)}
 .deliverable-list{margin-top:8px;padding-top:8px;border-top:1px dashed var(--border)}
@@ -1695,6 +1697,7 @@ function renderItemCard(item, isAdmin, today, kids, isOrphan) {
             <div class="work-item-title">⊢ ${escapeHtml(k.title)} <span class="badge badge-sub">子任务</span></div>
           </div>
           ${k.description ? `<div class="work-item-desc">${escapeHtml(k.description)}</div>` : ''}
+          ${k.completion_note ? `<div class="work-item-note">✅ <span class="note-label">完成说明</span>：${escapeHtml(k.completion_note)}</div>` : ''}
           <div class="work-item-meta">
             <span class="badge badge-${k.priority.toLowerCase()}">${PRIORITY_MAP[k.priority]||k.priority}</span>
             <span class="badge badge-${k.status}">${STATUS_MAP[k.status]||k.status}</span>
@@ -1722,6 +1725,7 @@ function renderItemCard(item, isAdmin, today, kids, isOrphan) {
       <div class="work-item-title">${escapeHtml(item.title)}${isOrphan?' <span class="badge badge-sub">子任务</span>':''}</div>
     </div>
     ${item.description ? `<div class="work-item-desc">${escapeHtml(item.description)}</div>` : ''}
+    ${item.completion_note ? `<div class="work-item-note">✅ <span class="note-label">完成说明</span>：${escapeHtml(item.completion_note)}</div>` : ''}
     <div class="work-item-meta">
       <span class="badge badge-${item.priority.toLowerCase()}">${PRIORITY_MAP[item.priority]||item.priority}</span>
       <span class="badge badge-${item.status}">${STATUS_MAP[item.status]||item.status}</span>
@@ -1843,7 +1847,7 @@ async function submitComplete(itemId) {
   try {
     // 先更新状态 + 说明
     await api(`/api/work-items/${itemId}`, {method:'PUT', body:JSON.stringify({status:'completed', completion_note: note})});
-    markCardCompleted(itemId);   // v20：立即显示删除线
+    markCardCompleted(itemId, note);   // v20：立即显示删除线；v29.6：同时回显完成说明
     // v26.2：批量上传交付物（统一文件清单：多选/追加/文件夹）
     for (let i = 0; i < deliverableFiles.length; i++) {
       const f = deliverableFiles[i];
@@ -2076,9 +2080,17 @@ async function deleteMilestone(itemId, msId) {
 }
 
 // v20：任务完成后立即在 DOM 上显示删除线（不等整页刷新/切换标签页）
-function markCardCompleted(itemId) {
+function markCardCompleted(itemId, note) {
   document.querySelectorAll(`[data-item-id="${itemId}"]`).forEach(card => {
     card.classList.add('completed');
+    // v29.6：完成后立即回显完成说明（不等整页刷新）
+    if (note && !card.querySelector('.work-item-note')) {
+      const noteEl = document.createElement('div');
+      noteEl.className = 'work-item-note';
+      noteEl.innerHTML = `✅ <span class="note-label">完成说明</span>：${escapeHtml(note)}`;
+      const meta = card.querySelector('.work-item-meta');
+      if (meta) meta.before(noteEl); else card.appendChild(noteEl);
+    }
     // 状态徽标：待处理/进行中 → 已完成
     card.querySelectorAll('.badge').forEach(b => {
       const t = (b.textContent || '').trim();
