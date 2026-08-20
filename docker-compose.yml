@@ -1,0 +1,17 @@
+services:
+  infra-workbench:
+    build: .
+    container_name: infra-workbench
+    ports:
+      - "9080:8080"
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - infra-net
+
+networks:
+  infra-net:
+    driver: bridge
