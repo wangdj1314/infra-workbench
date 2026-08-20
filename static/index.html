@@ -611,7 +611,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="login-card">
     <div class="login-logo">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <h1>基础架构工作台 <span class="version-badge">v29.4</span></h1>
+      <h1>基础架构工作台 <span class="version-badge">v29.5</span></h1>
       <p>Infrastructure Team Workbench</p>
     </div>
     <div id="loginError" class="login-error hidden"></div>
@@ -636,7 +636,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="topbar">
     <div class="topbar-left">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" style="width:22px;height:22px"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v29.4">v29.4</span>
+      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v29.5">v29.5</span>
     </div>
     <div class="topbar-right">
       <div class="ai-token-badge" onclick="switchTab('apikey')" title="AI Token 消耗">
@@ -2962,12 +2962,14 @@ function renderWidgetTiles() {
     const isCustom = w.kind === 'iframe' && w.id;
     const edit = isCustom ? `<button class="rs-tile-del" title="编辑" style="right:26px" onclick="event.stopPropagation();showEditWidgetModal(${w.id})">✎</button>` : '';
     const poolBadge = w._pool_synced ? `<span class="rs-tile-pool-badge" title="来自公共池，自动跟随更新">池</span>` : '';
+    // v29.5：新窗口打开的工具显示角标，点击行为不同于嵌入弹窗
+    const winBadge = (w.kind === 'iframe' && (w.config || {}).open_mode === 'window') ? `<span class="rs-tile-pool-badge" title="新窗口打开">↗</span>` : '';
     const body = w.kind === 'iframe' ? '' : `<div class="rs-tile-body">${previewLines(w)}</div>`;
     return `
     <div class="rs-tile size-${size}" title="${escapeHtml(w.title)}" onclick="openWidget('${w.kind}', ${w.id ?? 'null'})">
       <div class="rs-tile-head">
         <span class="rs-tile-icon">${w.icon || tileDefaultIcon(w.kind)}</span>
-        <span class="rs-tile-title">${escapeHtml(title)}${poolBadge}</span>
+        <span class="rs-tile-title">${escapeHtml(title)}${poolBadge}${winBadge}</span>
         <button class="rs-tile-size-btn" title="尺寸：${SIZE_LABEL[size]}（点击切换）" onclick="event.stopPropagation();cycleWidgetSize('${w.kind}', ${w.id ?? 'null'})">${SIZE_LABEL[size] === '大' ? '🗕' : '⤢'}</button>
         ${edit}
         ${del}
@@ -3011,8 +3013,14 @@ function openWidget(kind, id) {
   if (kind === 'iframe' && id) {
     const w = (widgetsCache.custom || []).find(x => x.id === id);
     if (w && w.url) {
+      // v29.5：打开方式支持「新窗口」——OA/Zabbix 等系统带 SSO 跳转或禁止 iframe 嵌入（X-Frame-Options），
+      // 沙箱 iframe 内会 404/空白；config.open_mode='window' 时直接新开标签页
+      if ((w.config || {}).open_mode === 'window') {
+        window.open(w.url, '_blank');
+        return;
+      }
       // v29.3：sandbox 去掉 allow-same-origin —— 与 allow-scripts 同开时 iframe 可自行移除 sandbox 属性，等同于无沙箱
-      openWidgetModal(w.title || '工具', `<iframe src="${escapeHtml(w.url)}" sandbox="allow-scripts allow-forms allow-popups"></iframe>`);
+      openWidgetModal(w.title || '工具', `<iframe src="${escapeHtml(w.url)}" sandbox="allow-scripts allow-forms allow-popups"></iframe>`, w.url);
       return;
     }
   }
@@ -3054,14 +3062,19 @@ function openWidget(kind, id) {
       </div>`).join('') + '</div>';
   }).catch(() => { body.innerHTML = '<div class="rs-widget-empty">加载失败</div>'; });
 }
-function openWidgetModal(title, innerHtml) {
+function openWidgetModal(title, innerHtml, url) {
   const box = document.createElement('div');
   box.className = 'widget-modal';
+  // v29.5：嵌入弹窗头部增加「新窗口打开」——内嵌空白/404 时的逃生通道
+  const winBtn = url ? `<button class="widget-modal-close" title="新窗口打开" onclick="window.open(${jsStr(url)}, '_blank')">↗</button>` : '';
   box.innerHTML = `
     <div class="widget-modal-box">
       <div class="widget-modal-head">
         <span class="widget-modal-title">${escapeHtml(title)}</span>
-        <button class="widget-modal-close" onclick="this.closest('.widget-modal').remove()">×</button>
+        <span style="display:flex;gap:2px">
+          ${winBtn}
+          <button class="widget-modal-close" onclick="this.closest('.widget-modal').remove()">×</button>
+        </span>
       </div>
       <div class="widget-modal-body">${innerHtml}</div>
     </div>`;
@@ -3154,6 +3167,13 @@ function showWidgetCustomForm(box) {
           <option value="l">大（整行，显示 6 条摘要）</option>
         </select>
       </div>
+      <div id="wgOpenModeWrap">
+        <label style="font-size:12px;color:var(--muted)">打开方式</label>
+        <select id="wgOpenMode" class="input" style="width:100%;margin-top:4px">
+          <option value="iframe" selected>嵌入弹窗（iframe）</option>
+          <option value="window">新窗口打开（适合 OA/Zabbix 等带登录跳转或禁止嵌入的系统）</option>
+        </select>
+      </div>
       <div style="display:flex;gap:8px;margin-top:6px">
         <button class="btn btn-sm" onclick="backWidgetPoolView(this.closest('.widget-modal'))">← 返回公共池</button>
         <button class="btn" style="flex:1" onclick="saveNewWidget()">保存</button>
@@ -3161,7 +3181,12 @@ function showWidgetCustomForm(box) {
     </div>`;
   const kindSel = cv.querySelector('#wgKind');
   const urlWrap = cv.querySelector('#wgUrlWrap');
-  kindSel.addEventListener('change', () => { urlWrap.style.display = kindSel.value === 'iframe' ? '' : 'none'; });
+  const openModeWrap = cv.querySelector('#wgOpenModeWrap');
+  kindSel.addEventListener('change', () => {
+    const isIframe = kindSel.value === 'iframe';
+    urlWrap.style.display = isIframe ? '' : 'none';
+    openModeWrap.style.display = isIframe ? '' : 'none';
+  });
 }
 function backWidgetPoolView(box) {
   box.querySelector('#wgCustomView').style.display = 'none';
@@ -3173,10 +3198,12 @@ async function saveNewWidget() {
   const url = document.getElementById('wgUrl').value.trim();
   const icon = document.getElementById('wgIcon').value.trim();
   const size = document.getElementById('wgSize').value || 'm';
+  // v29.5：打开方式（仅 iframe 类工具生效）
+  const open_mode = kind === 'iframe' ? (document.getElementById('wgOpenMode').value || 'iframe') : undefined;
   if (!title) { alert('请填写工具名称'); return; }
   if (kind === 'iframe' && !url) { alert('请填写网页地址'); return; }
   try {
-    await api('/api/widgets', { method:'POST', body: JSON.stringify({title, kind, url, icon, config: {size}}) });
+    await api('/api/widgets', { method:'POST', body: JSON.stringify({title, kind, url, icon, config: {size, open_mode}}) });
     document.querySelector('.widget-modal').remove();
     loadWidgets();
   } catch(err) { alert(err.message); }
@@ -3216,6 +3243,13 @@ function showEditWidgetModal(id) {
             <label style="font-size:12px;color:var(--muted)">图标（emoji）</label>
             <input id="ewIcon" class="input" style="width:100%;margin-top:4px" value="${escapeHtml(w.icon || '')}" ${synced ? 'disabled' : ''}>
           </div>
+          ${(w.kind === 'iframe') ? `<div>
+            <label style="font-size:12px;color:var(--muted)">打开方式（个人设置，不受公共池同步影响）</label>
+            <select id="ewOpenMode" class="input" style="width:100%;margin-top:4px">
+              <option value="iframe" ${((w.config||{}).open_mode||'iframe')==='iframe'?'selected':''}>嵌入弹窗（iframe）</option>
+              <option value="window" ${(w.config||{}).open_mode==='window'?'selected':''}>新窗口打开（适合 OA/Zabbix 等带登录跳转或禁止嵌入的系统）</option>
+            </select>
+          </div>` : ''}
           ${synced ? `<label style="font-size:12px;display:flex;gap:6px;align-items:center;cursor:pointer">
             <input type="checkbox" id="ewUnlink" onchange="['ewTitle','ewUrl','ewIcon'].forEach(i=>document.getElementById(i).disabled=!this.checked)">
             从此独立（解除公共池关联，之后可自行修改且不再跟随更新）</label>` : ''}
@@ -3232,6 +3266,14 @@ async function saveEditWidget(id, wasSynced) {
     body.title = document.getElementById('ewTitle').value.trim();
     body.url = document.getElementById('ewUrl').value.trim();
     body.icon = document.getElementById('ewIcon').value.trim();
+  }
+  // v29.5：打开方式为个人 config，无论是否关联公共池都可改（保留 size 等其他配置）
+  const omSel = document.getElementById('ewOpenMode');
+  if (omSel) {
+    const w = (widgetsCache.custom || []).find(x => x.id === id);
+    const cfg = Object.assign({}, (w && w.config) || {});
+    cfg.open_mode = omSel.value || 'iframe';
+    body.config = cfg;
   }
   try {
     await api(`/api/widgets/${id}`, { method:'PUT', body: JSON.stringify(body) });
