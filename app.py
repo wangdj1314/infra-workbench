@@ -4805,26 +4805,22 @@ def _zbx_problems(limit=20):
         'recent': False,          # 仅未恢复的活跃告警
         'sortfield': ['eventid'], 'sortorder': 'DESC', 'limit': limit,  # 6.0 仅允许按 eventid 排序（递增即时间递增）
     }) or []
-    # triggerid → hostid
+    # triggerid → hosts（6.0 的 trigger 无 hostid 字段，须用 selectHosts 带出所属主机）
     triggerids = list({p['objectid'] for p in problems if p.get('object') == '0' and p.get('objectid')})
     trig_host = {}
-    hostids = set()
     if triggerids:
-        for t in (_zbx_rpc('trigger.get', {'output': ['triggerid', 'hostid'], 'triggerids': triggerids}) or []):
-            trig_host[t['triggerid']] = t.get('hostid')
-            if t.get('hostid'):
-                hostids.add(t['hostid'])
-    hosts = {}
-    if hostids:
-        for h in (_zbx_rpc('host.get', {'output': ['hostid', 'name'], 'hostids': list(hostids)}) or []):
-            hosts[h['hostid']] = h['name']
+        for t in (_zbx_rpc('trigger.get', {'output': ['triggerid'], 'triggerids': triggerids,
+                                            'selectHosts': ['hostid', 'name']}) or []):
+            hs = t.get('hosts') or []
+            if hs:
+                trig_host[t['triggerid']] = hs[0].get('name') or hs[0].get('host') or ''
     return [{
         'eventid': p.get('eventid'),
         'name': p.get('name'),
         'severity': int(p.get('severity') or 0),
         'severity_name': ZBX_SEVERITY.get(int(p.get('severity') or 0), '未知'),
         'clock': int(p.get('clock') or 0),
-        'host': hosts.get(trig_host.get(p.get('objectid'), ''), ''),
+        'host': trig_host.get(p.get('objectid'), '')
     } for p in problems]
 
 
