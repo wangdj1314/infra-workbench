@@ -611,7 +611,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="login-card">
     <div class="login-logo">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <h1>基础架构工作台 <span class="version-badge">v29.5</span></h1>
+      <h1>基础架构工作台 <span class="version-badge">v29.6</span></h1>
       <p>Infrastructure Team Workbench</p>
     </div>
     <div id="loginError" class="login-error hidden"></div>
@@ -636,7 +636,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="topbar">
     <div class="topbar-left">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" style="width:22px;height:22px"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v29.5">v29.5</span>
+      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v29.6">v29.6</span>
     </div>
     <div class="topbar-right">
       <div class="ai-token-badge" onclick="switchTab('apikey')" title="AI Token 消耗">
@@ -2915,6 +2915,14 @@ function parseWidgetTime(it) {
 }
 function previewLines(w) {
   const size = w.size || 'm';
+  // v29.6：Zabbix 告警磁贴——瓦片只显示当前告警数，详情点进弹层
+  if (w.kind === 'zabbix') {
+    if (w.zabbix_ok === false) return '<div class="rs-tile-empty">Zabbix API 未配置或连接失败</div>';
+    const n = w.zabbix_count || 0;
+    return `<div class="rs-tile-preview-line"><span class="rs-tile-txt" style="flex:1">${n > 0
+      ? `当前未恢复告警 <b style="color:${n >= 5 ? '#f85149' : '#d29922'}">${n}</b> 条`
+      : '<span style="color:#3fb950">✓ 当前无未恢复告警</span>'}</span></div>`;
+  }
   const items = w.preview || [];
   if (!items.length) return '<div class="rs-tile-empty">今日暂无内容</div>';
   // 聊天小工具：按会话分组折叠显示（不展开单条记录）
@@ -2983,7 +2991,52 @@ function renderWidgetTiles() {
     </div>`;
 }
 function tileDefaultIcon(kind) {
-  return ({todo:'📌', calendar:'🗓️', chat:'💬', minutes:'🎙️'})[kind] || '🧩';
+  return ({todo:'📌', calendar:'🗓️', chat:'💬', minutes:'🎙️', zabbix:'🚨'})[kind] || '🧩';
+}
+// v29.6：Zabbix 告警弹层（后端 /api/zabbix/problems 拉取，点击条目新窗口打开 Zabbix 问题视图）
+const ZBX_SEV_COLOR = ['#8b949e', '#58a6ff', '#d29922', '#db6d28', '#f85149', '#f85149'];
+function fmtZbxClock(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function renderZbxRows(list, webUrl, max) {
+  if (!list.length) return '<div class="rs-widget-empty">✓ 当前无未恢复告警</div>';
+  return '<div class="rs-mini-list">' + list.slice(0, max).map(p => `
+    <div class="rs-widget-row" style="align-items:flex-start;cursor:pointer" title="点击在新窗口打开 Zabbix 问题视图"
+         onclick="window.open(${jsStr(webUrl + '/zabbix.php?action=problem.view&eventid=' + p.eventid)}, '_blank')">
+      <span style="flex:none;width:8px;height:8px;border-radius:50%;background:${ZBX_SEV_COLOR[p.severity] || '#8b949e'};margin-top:5px"></span>
+      <div style="min-width:0;flex:1">
+        <div class="rs-w-title" style="white-space:normal;max-width:100%">${escapeHtml(p.name)}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px">${escapeHtml(p.host || '')} · ${escapeHtml(p.severity_name)} · ${fmtZbxClock(p.clock)}</div>
+      </div>
+    </div>`).join('') + '</div>';
+}
+function openZabbixModal() {
+  const box = document.createElement('div');
+  box.className = 'widget-modal';
+  box.innerHTML = `
+    <div class="widget-modal-box">
+      <div class="widget-modal-head">
+        <span class="widget-modal-title">🚨 Zabbix 告警清单</span>
+        <span style="display:flex;gap:2px">
+          <button class="widget-modal-close" title="刷新" id="zbxRefresh">↻</button>
+          <button class="widget-modal-close" onclick="this.closest('.widget-modal').remove()">×</button>
+        </span>
+      </div>
+      <div class="widget-modal-body"><div class="rs-widget-empty">加载中...</div></div>
+    </div>`;
+  document.body.appendChild(box);
+  const body = box.querySelector('.widget-modal-body');
+  const load = () => {
+    body.innerHTML = '<div class="rs-widget-empty">加载中...</div>';
+    api('/api/zabbix/problems').then(d => {
+      body.innerHTML = renderZbxRows(d.problems || [], d.web_url || 'https://zabbix.risen.com', 100);
+    }).catch(e => { body.innerHTML = `<div class="rs-widget-empty">${escapeHtml(e.message || '加载失败')}</div>`; });
+  };
+  box.querySelector('#zbxRefresh').addEventListener('click', load);
+  load();
 }
 async function cycleWidgetSize(kind, id) {
   // 找到当前磁贴，切换 s→m→l→s 并保存
@@ -3019,11 +3072,17 @@ function openWidget(kind, id) {
         window.open(w.url, '_blank');
         return;
       }
-      // v29.3：sandbox 去掉 allow-same-origin —— 与 allow-scripts 同开时 iframe 可自行移除 sandbox 属性，等同于无沙箱
-      openWidgetModal(w.title || '工具', `<iframe src="${escapeHtml(w.url)}" sandbox="allow-scripts allow-forms allow-popups"></iframe>`, w.url);
+      // v29.6：compat 兼容嵌入——保留同源能力（localStorage/Cookie），仅限可信内网系统；
+      // 与 allow-scripts 同开时 iframe 可脱离沙箱，勿用于外部/不可信地址
+      const sb = (w.config || {}).open_mode === 'compat'
+        ? 'allow-scripts allow-forms allow-popups allow-same-origin'
+        : 'allow-scripts allow-forms allow-popups';  // v29.3 默认严格沙箱
+      openWidgetModal(w.title || '工具', `<iframe src="${escapeHtml(w.url)}" sandbox="${sb}"></iframe>`, w.url);
       return;
     }
   }
+  // v29.6：Zabbix 告警磁贴——后端 API 拉取告警列表（Zabbix 禁止 iframe 嵌入）
+  if (kind === 'zabbix') { openZabbixModal(); return; }
   // 内置小工具：打开列表弹层（按实际发生时间倒序，今日优先）
   const map = {
     todo:   { icon:'📌', source:'dingtalk_todo',    title:'待办列表',  empty:'暂无待办',  fmt: t => t.title.replace(/^📌\s*/, '') },
@@ -3145,6 +3204,7 @@ function showWidgetCustomForm(box) {
         <label style="font-size:12px;color:var(--muted)">类型</label>
         <select id="wgKind" class="input" style="width:100%;margin-top:4px">
           <option value="iframe">自定义网页 (iframe)</option>
+          <option value="zabbix">内置：Zabbix 告警清单</option>
           <option value="todo">内置：待办列表</option>
           <option value="calendar">内置：日程</option>
           <option value="chat">内置：最近聊天</option>
@@ -3170,7 +3230,8 @@ function showWidgetCustomForm(box) {
       <div id="wgOpenModeWrap">
         <label style="font-size:12px;color:var(--muted)">打开方式</label>
         <select id="wgOpenMode" class="input" style="width:100%;margin-top:4px">
-          <option value="iframe" selected>嵌入弹窗（iframe）</option>
+          <option value="iframe" selected>嵌入弹窗（iframe 严格沙箱）</option>
+          <option value="compat">嵌入弹窗（兼容模式，保留登录态/localStorage，仅限可信内网系统）</option>
           <option value="window">新窗口打开（适合 OA/Zabbix 等带登录跳转或禁止嵌入的系统）</option>
         </select>
       </div>
@@ -3246,7 +3307,8 @@ function showEditWidgetModal(id) {
           ${(w.kind === 'iframe') ? `<div>
             <label style="font-size:12px;color:var(--muted)">打开方式（个人设置，不受公共池同步影响）</label>
             <select id="ewOpenMode" class="input" style="width:100%;margin-top:4px">
-              <option value="iframe" ${((w.config||{}).open_mode||'iframe')==='iframe'?'selected':''}>嵌入弹窗（iframe）</option>
+              <option value="iframe" ${((w.config||{}).open_mode||'iframe')==='iframe'?'selected':''}>嵌入弹窗（iframe 严格沙箱）</option>
+              <option value="compat" ${(w.config||{}).open_mode==='compat'?'selected':''}>嵌入弹窗（兼容模式，保留登录态/localStorage，仅限可信内网系统）</option>
               <option value="window" ${(w.config||{}).open_mode==='window'?'selected':''}>新窗口打开（适合 OA/Zabbix 等带登录跳转或禁止嵌入的系统）</option>
             </select>
           </div>` : ''}

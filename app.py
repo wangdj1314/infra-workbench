@@ -2698,14 +2698,16 @@ def delete_quick_link(link_id):
 # ====================================================================
 # 右侧小工具（磁贴 + iframe 自定义）
 # ====================================================================
-# 内置小工具 kind：todo(待办) / calendar(日程) / chat(聊天) / minutes(听记) / zabbix(预留) / ticket(预留)
+# 内置小工具 kind：todo(待办) / calendar(日程) / chat(聊天) / minutes(听记) / zabbix(告警，v29.6)
 # 自定义小工具 kind=iframe，url 为用户填写的 iframe 地址
 BUILTIN_WIDGETS = [
     {'kind': 'todo', 'title': '待办列表', 'icon': '📌'},
     {'kind': 'calendar', 'title': '今日日程', 'icon': '🗓️'},
     {'kind': 'chat', 'title': '最近聊天', 'icon': '💬'},
     {'kind': 'minutes', 'title': '听记摘要', 'icon': '🎙️'},
+    {'kind': 'zabbix', 'title': 'Zabbix 告警', 'icon': '🚨'},
 ]
+BUILTIN_KINDS = ('todo', 'calendar', 'chat', 'minutes', 'zabbix')
 
 # 内置磁贴 → 知识库来源 & 磁贴默认摘要条数
 WIDGET_SOURCE = {
@@ -2774,7 +2776,7 @@ def list_widgets():
         (uid,)
     ).fetchall()
     # 内置小工具：以配置表为准合并（配置里 kind 为内置时覆盖默认图标/标题/尺寸）
-    builtin_cfg = {w['kind']: w for w in custom if w['kind'] in ('todo', 'calendar', 'chat', 'minutes')}
+    builtin_cfg = {w['kind']: w for w in custom if w['kind'] in BUILTIN_KINDS}
     builtins = []
     for b in BUILTIN_WIDGETS:
         cfg = builtin_cfg.get(b['kind'])
@@ -2784,7 +2786,15 @@ def list_widgets():
         else:
             item = {'id': None, 'user_id': uid, 'kind': b['kind'], 'title': b['title'],
                     'icon': b['icon'], 'url': '', 'config': {}, 'enabled': 1}
-        item['preview'] = _widget_preview(db, uid, b['kind'], today)
+        item['preview'] = _widget_preview(db, uid, b['kind'], today) if b['kind'] != 'zabbix' else []
+        # v29.6：zabbix 告警磁贴附带未恢复告警数（供磁贴角标/预览；拉取失败不阻塞整体列表）
+        if b['kind'] == 'zabbix':
+            try:
+                item['zabbix_count'] = len(_zbx_problems(limit=30))
+                item['zabbix_ok'] = True
+            except Exception:
+                item['zabbix_count'] = 0
+                item['zabbix_ok'] = False
         item['size'] = item.get('config', {}).get('size', 'm')
         builtins.append(item)
     iframes = []
@@ -2792,7 +2802,7 @@ def list_widgets():
     pool_rows = db.execute('SELECT * FROM tile_tool_pool').fetchall()
     pool_map = {p['id']: p for p in pool_rows}
     for w in custom:
-        if w['kind'] not in ('todo', 'calendar', 'chat', 'minutes'):
+        if w['kind'] not in BUILTIN_KINDS:
             item = dict(w)
             pid = item.get('pool_id') or 0
             pool = pool_map.get(pid) if pid else None
@@ -2856,7 +2866,7 @@ def add_widget():
     if url and not url.startswith(('http://', 'https://')):
         url = 'https://' + url
     # 内置 kind 允许覆盖默认标题/图标
-    if kind in ('todo', 'calendar', 'chat', 'minutes'):
+    if kind in BUILTIN_KINDS:
         db.execute(
             "DELETE FROM user_widgets WHERE user_id = ? AND kind = ?",
             (uid, kind)
@@ -4711,6 +4721,127 @@ def activity_stats():
         'last_visit': last_visit,
         'daily': [{'date': r['d'], 'count': r['c']} for r in daily]
     })
+
+
+# ====================================================================
+# v29.6：Zabbix 告警磁贴（后端走 Zabbix JSON-RPC API，绕开 X-Frame-Options 禁止嵌入的限制）
+# 需环境变量：ZABBIX_API_URL（…/api_jsonrpc.php）/ ZABBIX_API_USER / ZABBIX_API_PASS
+# ====================================================================
+ZABBIX_API_URL = os.environ.get('ZABBIX_API_URL', '')
+ZABBIX_API_USER = os.environ.get('ZABBIX_API_USER', '')
+ZABBIX_API_PASS = os.environ.get('ZABBIX_API_PASS', '')
+# v29.6：也支持直接配 API Token（Zabbix 5.4+ 管理界面生成），无需用户名密码
+ZABBIX_API_TOKEN = os.environ.get('ZABBIX_API_TOKEN', '')
+ZABBIX_WEB_URL = os.environ.get('ZABBIX_WEB_URL', 'https://zabbix.risen.com')
+ZBX_SEVERITY = {0: '未分类', 1: '信息', 2: '警告', 3: '一般严重', 4: '严重', 5: '灾难'}
+_ZBX = {'auth': None, 'until': 0.0, 'ver': None}  # 登录态缓存（进程内，每 gunicorn worker 独立）
+_ZBX_LOCK = threading.Lock()
+
+
+def _zbx_call(method, params, auth=None, timeout=10):
+    payload = {'jsonrpc': '2.0', 'method': method, 'params': params, 'id': 1}
+    if auth:
+        payload['auth'] = auth
+    r = requests.post(ZABBIX_API_URL, json=payload, timeout=timeout, verify=False)
+    r.raise_for_status()
+    return r.json()
+
+
+def _zbx_login():
+    """登录取 token；Zabbix 6.0+ 参数名 username，旧版 user，两种都试"""
+    last_err = '登录失败'
+    for key in (('username', 'user') if _ZBX['ver'] in (None, 'new') else ('user', 'username')):
+        try:
+            res = _zbx_call('user.login', {key: ZABBIX_API_USER, 'password': ZABBIX_API_PASS})
+            if res.get('result'):
+                _ZBX['ver'] = 'new' if key == 'username' else 'old'
+                return res['result']
+            last_err = (res.get('error') or {}).get('data') or (res.get('error') or {}).get('message') or '登录失败'
+        except Exception as e:
+            last_err = str(e)
+    raise RuntimeError(last_err)
+
+
+def _zbx_rpc(method, params, timeout=10):
+    """带登录态缓存与自动重登的 RPC；未配置凭据时抛异常由路由转 503"""
+    # Token 模式：直接用，无需登录（token 失效时报错提示重新生成）
+    if ZABBIX_API_TOKEN:
+        if not ZABBIX_API_URL:
+            raise RuntimeError('未配置 ZABBIX_API_URL')
+        res = _zbx_call(method, params, auth=ZABBIX_API_TOKEN, timeout=timeout)
+        if res.get('error'):
+            err = res['error']
+            raise RuntimeError(f"Zabbix API Token 调用失败（可能已失效/权限不足）：{(err.get('message') or '')} {(err.get('data') or '')}".strip())
+        return res.get('result')
+    if not (ZABBIX_API_URL and ZABBIX_API_USER and ZABBIX_API_PASS):
+        raise RuntimeError('未配置 Zabbix API（ZABBIX_API_URL + ZABBIX_API_TOKEN，或 ZABBIX_API_USER/PASS）')
+    with _ZBX_LOCK:
+        if not _ZBX['auth'] or time.time() >= _ZBX['until']:
+            _ZBX['auth'] = _zbx_login()
+            _ZBX['until'] = time.time() + 1500  # 25 分钟，早于 Zabbix 会话过期重登
+        auth = _ZBX['auth']
+    res = _zbx_call(method, params, auth=auth, timeout=timeout)
+    err = res.get('error')
+    if err:
+        msg = f"{(err.get('message') or '')} {(err.get('data') or '')}".strip()
+        # 会话失效类错误：清缓存重登重试一次
+        if any(k in msg for k in ('authoris', 'authoriz', 'Session terminated', 're-login', '登录')):
+            with _ZBX_LOCK:
+                _ZBX['auth'], _ZBX['until'] = None, 0.0
+                auth = _zbx_login()
+                _ZBX['auth'], _ZBX['until'] = auth, time.time() + 1500
+            res = _zbx_call(method, params, auth=auth, timeout=timeout)
+            err = res.get('error')
+        if err:
+            raise RuntimeError(f"{(err.get('message') or '')} {(err.get('data') or '')}".strip())
+    return res.get('result')
+
+
+def _zbx_problems(limit=20):
+    """拉取当前未恢复的告警（按时间倒序），附带主机名。
+    6.0 的 problem 无 hostid 字段，需经 objectid(triggerid) → trigger.get → hostid → host.get 链式解析"""
+    problems = _zbx_rpc('problem.get', {
+        'output': 'extend',
+        'recent': False,          # 仅未恢复的活跃告警
+        'sortfield': ['eventid'], 'sortorder': 'DESC', 'limit': limit,  # 6.0 仅允许按 eventid 排序（递增即时间递增）
+    }) or []
+    # triggerid → hostid
+    triggerids = list({p['objectid'] for p in problems if p.get('object') == '0' and p.get('objectid')})
+    trig_host = {}
+    hostids = set()
+    if triggerids:
+        for t in (_zbx_rpc('trigger.get', {'output': ['triggerid', 'hostid'], 'triggerids': triggerids}) or []):
+            trig_host[t['triggerid']] = t.get('hostid')
+            if t.get('hostid'):
+                hostids.add(t['hostid'])
+    hosts = {}
+    if hostids:
+        for h in (_zbx_rpc('host.get', {'output': ['hostid', 'name'], 'hostids': list(hostids)}) or []):
+            hosts[h['hostid']] = h['name']
+    return [{
+        'eventid': p.get('eventid'),
+        'name': p.get('name'),
+        'severity': int(p.get('severity') or 0),
+        'severity_name': ZBX_SEVERITY.get(int(p.get('severity') or 0), '未知'),
+        'clock': int(p.get('clock') or 0),
+        'host': hosts.get(trig_host.get(p.get('objectid'), ''), ''),
+    } for p in problems]
+
+
+@app.route('/api/zabbix/problems')
+@login_required
+def zabbix_problems():
+    """Zabbix 当前告警列表（供告警磁贴展示）"""
+    try:
+        items = _zbx_problems(limit=30)
+    except RuntimeError as e:
+        msg = str(e)
+        if msg.startswith('未配置'):
+            return jsonify({'error': msg}), 503
+        return jsonify({'error': f'Zabbix API 调用失败：{msg}'}), 502
+    except Exception as e:
+        return jsonify({'error': f'Zabbix API 调用失败：{e}'}), 502
+    return jsonify({'problems': items, 'web_url': ZABBIX_WEB_URL})
 
 
 # ====================================================================
