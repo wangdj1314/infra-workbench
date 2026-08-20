@@ -164,6 +164,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
 .widget-modal-body{flex:1;overflow:auto;padding:14px;font-size:13px;line-height:1.7}
 .widget-modal-body iframe{width:100%;height:100%;border:none;border-radius:8px;background:#fff}
 .rs-mini-list{max-height:300px;overflow-y:auto}
+.widget-modal-body .rs-mini-list{max-height:none;overflow:visible}  /* 弹窗内不限高，随弹层整体滚动，多显示条目 */
 
 /* ---- Sidebar ---- */
 .sb-time{text-align:center;margin-bottom:20px}
@@ -3004,12 +3005,12 @@ function fmtZbxClock(ts) {
 function renderZbxRows(list, webUrl, max) {
   if (!list.length) return '<div class="rs-widget-empty">✓ 当前无未恢复告警</div>';
   return '<div class="rs-mini-list">' + list.slice(0, max).map(p => `
-    <div class="rs-widget-row" style="align-items:flex-start;cursor:pointer" title="点击在新窗口打开 Zabbix 问题视图"
+    <div class="rs-widget-row" style="align-items:flex-start;cursor:pointer;padding:3px 0" title="点击在新窗口打开 Zabbix 问题视图"
          onclick="window.open(${jsStr(webUrl + '/zabbix.php?action=problem.view&eventid=' + p.eventid)}, '_blank')">
-      <span style="flex:none;width:8px;height:8px;border-radius:50%;background:${ZBX_SEV_COLOR[p.severity] || '#8b949e'};margin-top:5px"></span>
+      <span style="flex:none;width:8px;height:8px;border-radius:50%;background:${ZBX_SEV_COLOR[p.severity] || '#8b949e'};margin-top:4px"></span>
       <div style="min-width:0;flex:1">
-        <div class="rs-w-title" style="white-space:normal;max-width:100%">${escapeHtml(p.name)}</div>
-        <div style="font-size:10px;color:var(--muted);margin-top:2px">${escapeHtml(p.host || '')} · ${escapeHtml(p.severity_name)} · ${fmtZbxClock(p.clock)}</div>
+        <div class="rs-w-title" style="white-space:normal;max-width:100%;font-size:12px;line-height:1.35">${escapeHtml(p.name)}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:1px;line-height:1.3">${escapeHtml(p.host || '')} · ${escapeHtml(p.severity_name)} · ${fmtZbxClock(p.clock)}</div>
       </div>
     </div>`).join('') + '</div>';
 }
