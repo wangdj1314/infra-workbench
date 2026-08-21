@@ -5387,7 +5387,8 @@ function showNewLinkForm() {
 function showModal(html) {
   closeCal();
   document.body.style.overflow = 'hidden';
-  document.getElementById('modalContainer').innerHTML = `<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal">${html}</div></div>`;
+  // v29.6：点击遮罩不再关闭弹窗（复制 token 等场景易误触），只能经右上角 × 或取消按钮关闭
+  document.getElementById('modalContainer').innerHTML = `<div class="modal-overlay"><div class="modal">${html}</div></div>`;
 }
 function closeModal() {
   stopDevicePoll();
