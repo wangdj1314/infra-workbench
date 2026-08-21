@@ -620,7 +620,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="login-card">
     <div class="login-logo">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <h1>基础架构工作台 <span class="version-badge">v29.7.1</span></h1>
+      <h1>基础架构工作台 <span class="version-badge">v29.7.2</span></h1>
       <p>Infrastructure Team Workbench</p>
     </div>
     <div id="loginError" class="login-error hidden"></div>
@@ -645,7 +645,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="topbar">
     <div class="topbar-left">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" style="width:22px;height:22px"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v29.7.1">v29.7.1</span>
+      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v29.7.2">v29.7.2</span>
     </div>
     <div class="topbar-right">
       <div class="ai-token-badge" onclick="switchTab('apikey')" title="AI Token 消耗">
@@ -1375,11 +1375,13 @@ const ITOP_STATUS_LABEL = {new:'新建', assigned:'已指派', pending:'挂起',
   reject:'已拒绝', in_process:'处理中', waiting_for_approval:'待审批', implemented:'已实施',
   approved:'已审批', planned:'已计划', accepted:'已验收'};
 const ITOP_STIMULUS_OPTS = [
-  ['ev_assign','指派/受理'], ['ev_startworking','开始处理'], ['ev_pending','挂起等待'],
-  ['ev_update','恢复处理'], ['ev_resolve','标记解决'],
-  ['ev_close','关闭工单'], ['ev_reopen','重新打开'], ['ev_reassign','转派'], ['ev_reject','拒绝']];
-// v29.7.1：UserRequest/Incident 状态机可用动作（与后端 ITOP_STATE_STIMULI 保持一致）；
-// 定制版 iTop 要求 assigned 工单先「开始处理」才能解决/关闭
+  ['ev_assign','分配'], ['ev_process','接单'], ['ev_startworking','开始处理'], ['ev_pending','待定'],
+  ['ev_resume','恢复'], ['ev_update','恢复处理'], ['ev_resolve','标记为已解决'],
+  ['ev_manual_resolve','手动关闭'], ['ev_repair','委外维修'], ['ev_reassign','重新分配'],
+  ['ev_close','关闭'], ['ev_reopen','重新打开'], ['ev_return','退回'],
+  ['ev_withdraw','撤回'], ['ev_submit_approval','提交审批'], ['ev_reject','拒绝']];
+// v29.7.2：静态映射仅作后端实时抓取失败的兜底（Incident 为定制版状态机实测结果：
+// assigned 只能 ev_process 接单，无 ev_startworking）；权威来源是 /transitions 接口
 const ITOP_STATE_STIMULI = {
   UserRequest: {
     new: ['ev_assign','ev_reject'],
@@ -1391,13 +1393,13 @@ const ITOP_STATE_STIMULI = {
     reject: ['ev_reopen']
   },
   Incident: {
-    new: ['ev_assign','ev_reject'],
-    assigned: ['ev_startworking','ev_reassign','ev_pending'],
-    in_progress: ['ev_resolve','ev_pending','ev_reassign'],
-    pending: ['ev_update','ev_resolve','ev_reassign'],
+    new: ['ev_assign','ev_resolve','ev_submit_approval'],
+    assigned: ['ev_process','ev_return','ev_withdraw'],
+    in_process: ['ev_pending','ev_resolve','ev_reassign','ev_repair','ev_manual_resolve'],
+    pending: ['ev_resume'],
+    waiting_for_approval: ['ev_withdraw'],
     resolved: ['ev_close','ev_reopen'],
-    closed: [],
-    reject: ['ev_reopen']
+    closed: []
   }
 };
 
@@ -1565,21 +1567,16 @@ function itopApplyStimulusGo() {
   if (!cur) return;
   const raw = cur.raw || {};
   const isUr = cur.cls === 'UserRequest';
-  // v29.7.1：按工单当前状态过滤可用流转动作（未映射的类/状态保留全量，交 iTop 校验）
+  // v29.7.2：先用静态兜底渲染占位，再异步拉 iTop 实时可用动作替换（定制版状态机权威来源）
   const stMap = (ITOP_STATE_STIMULI[cur.cls] || {})[cur.status];
-  const opts = stMap ? ITOP_STIMULUS_OPTS.filter(o => stMap.includes(o[0])) : ITOP_STIMULUS_OPTS;
-  if (stMap && opts.length === 0) {
-    alert(`工单当前状态「${itopStatusText(cur.status)}」无可用流转动作`);
-    return;
-  }
-  const stimSelectHtml = opts.length
-    ? `<select id="itopStimulus" onchange="onStimulusChange()">${opts.map(o => `<option value="${o[0]}">${o[1]}（${o[0]}）</option>`).join('')}</select>`
-    : `<div class="ai-hint">当前状态「${itopStatusText(cur.status)}」暂无已映射的可用动作，请先在工单页点同步刷新状态。</div>`;
+  const fbOpts = stMap ? ITOP_STIMULUS_OPTS.filter(o => stMap.includes(o[0])) : ITOP_STIMULUS_OPTS;
   showModal(`
     <div class="modal-header"><h3>工单流转 · ${escapeHtml(cur.ref)}</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
     <div class="modal-body">
       <div class="form-row"><label>流转动作</label>
-        ${stimSelectHtml}</div>
+        <select id="itopStimulus" onchange="onStimulusChange()" disabled>
+          <option value="">正在从 iTop 获取当前状态可用动作…</option>
+        </select></div>
       <div id="resolveFields" style="display:none">
         <div class="form-row"><label>解决方式 *</label>
           <select id="resolutionCode">
@@ -1609,13 +1606,47 @@ function itopApplyStimulusGo() {
         <div id="itopExtraList"></div>
       </div>
       <div class="form-row"><label>备注（可选）</label><textarea id="itopStimComment" style="min-height:60px"></textarea></div>
-      <p class="ai-hint">上方仅列出当前状态（${itopStatusText(cur.status)}）可执行的动作；如已指派未开工，请先选「开始处理」再标记解决。若 iTop 要求补充必填字段，会在此弹窗中动态出现。</p>
+      <p class="ai-hint" id="itopStimHint">上方动作清单实时取自 iTop 当前状态（${itopStatusText(cur.status)}）；若 iTop 要求补充必填字段，会在此弹窗中动态出现。</p>
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn btn-primary-sm" onclick="itopSubmitStimulus()">执行流转</button>
     </div>
   `);
+  loadItopTransitions(cur, fbOpts);
+}
+
+// v29.7.2：异步拉取 iTop 实时可用流转动作，替换弹窗下拉（失败降级静态兜底）
+async function loadItopTransitions(cur, fbOpts) {
+  const sel = document.getElementById('itopStimulus');
+  if (!sel) return;
+  let opts = null, source = '';
+  try {
+    const res = await fetch(`/api/itop/tickets/${cur.cls}/${cur.ref}/transitions`, {credentials: 'same-origin'});
+    if (res.ok) {
+      const data = await res.json();
+      source = data.source || '';
+      if (Array.isArray(data.transitions) && data.transitions.length) {
+        opts = data.transitions.map(t => [t.code, t.label || t.code]);
+      } else if (data.source === 'none') {
+        opts = ITOP_STIMULUS_OPTS;  // 未映射类：全量交 iTop 校验
+      } else {
+        opts = [];
+      }
+    }
+  } catch (e) { /* 降级 */ }
+  if (!document.getElementById('itopStimulus')) return;  // 弹窗已关
+  if (opts === null) opts = fbOpts;  // 接口异常：静态兜底
+  if (!opts.length) {
+    sel.outerHTML = `<div class="ai-hint">当前状态「${itopStatusText(cur.status)}」无可用流转动作${cur.status === 'closed' ? '（已关闭）' : '，请先在工单页点同步刷新状态'}。</div>`;
+    return;
+  }
+  sel.innerHTML = opts.map(o => `<option value="${o[0]}">${escapeHtml(o[1])}（${o[0]}）</option>`).join('');
+  sel.disabled = false;
+  const hint = document.getElementById('itopStimHint');
+  if (hint && source === 'static') {
+    hint.textContent = `⚠ 未能实时连接 iTop，上方为本地兜底动作清单（可能与实际不符，提交时以 iTop 校验为准）。当前状态：${itopStatusText(cur.status)}。`;
+  }
   onStimulusChange();
 }
 

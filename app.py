@@ -6717,15 +6717,22 @@ def list_knowledge():
 # 数据来源: itop-mcp 服务（run_oql / add_ticket_log / apply_stimulus）
 # ====================================================================
 ITOP_MCP_URL = os.environ.get('ITOP_MCP_URL', 'http://YOUR_SERVER_IP:8003/mcp')
+# v29.7.2：iTop Web UI 地址/账号（实时抓取工单当前状态可用流转动作，适配定制版状态机）
+ITOP_WEB_URL = os.environ.get('ITOP_WEB_URL', '')
+ITOP_WEB_USER = os.environ.get('ITOP_WEB_USER', '')
+ITOP_WEB_PASS = os.environ.get('ITOP_WEB_PASS', '')
 ITOP_CLASSES = ('UserRequest', 'Incident', 'Problem', 'Change')
 ITOP_CLOSED_STATUSES = ('resolved', 'closed', 'reject')
-# v29.7.1：UserRequest/Incident 状态机可用动作映射（定制版 iTop：assigned 须先 ev_startworking
-# 才能解决/关闭；此前下拉缺该动作导致 assigned 工单所有流转被 iTop 拒绝）。
-# 仅对已知工单类+已知状态预校验，未列出的类/状态仍透传 iTop 校验，避免误拦。
+# v29.7.2：静态映射仅作 iTop Web 抓取失败时的兜底；Incident 为 10.10.11.161 定制版
+# 状态机实测结果（assigned 只能 ev_process 接单，无 ev_startworking），
+# 权威来源是 /api/itop/tickets/<cls>/<ref>/transitions 实时抓取。
 ITOP_STIMULUS_LABEL = {
-    'ev_assign': '指派/受理', 'ev_startworking': '开始处理', 'ev_pending': '挂起等待',
-    'ev_update': '恢复处理', 'ev_resolve': '标记解决', 'ev_close': '关闭工单',
-    'ev_reopen': '重新打开', 'ev_reassign': '转派', 'ev_reject': '拒绝',
+    'ev_assign': '分配', 'ev_startworking': '开始处理', 'ev_process': '接单',
+    'ev_pending': '待定', 'ev_resume': '恢复', 'ev_resolve': '标记为已解决',
+    'ev_manual_resolve': '手动关闭', 'ev_repair': '委外维修', 'ev_reassign': '重新分配',
+    'ev_close': '关闭', 'ev_reopen': '重新打开', 'ev_return': '退回',
+    'ev_withdraw': '撤回', 'ev_submit_approval': '提交审批', 'ev_reject': '拒绝',
+    'ev_update': '恢复处理',
 }
 ITOP_STATE_STIMULI = {
     'UserRequest': {
@@ -6738,13 +6745,13 @@ ITOP_STATE_STIMULI = {
         'reject': ['ev_reopen'],
     },
     'Incident': {
-        'new': ['ev_assign', 'ev_reject'],
-        'assigned': ['ev_startworking', 'ev_reassign', 'ev_pending'],
-        'in_progress': ['ev_resolve', 'ev_pending', 'ev_reassign'],
-        'pending': ['ev_update', 'ev_resolve', 'ev_reassign'],
+        'new': ['ev_assign', 'ev_resolve', 'ev_submit_approval'],
+        'assigned': ['ev_process', 'ev_return', 'ev_withdraw'],
+        'in_process': ['ev_pending', 'ev_resolve', 'ev_reassign', 'ev_repair', 'ev_manual_resolve'],
+        'pending': ['ev_resume'],
+        'waiting_for_approval': ['ev_withdraw'],
         'resolved': ['ev_close', 'ev_reopen'],
         'closed': [],
-        'reject': ['ev_reopen'],
     },
 }
 # v29.0 工单流转可提交字段白名单（各工单类字段不同，iTop 端会二次校验）
@@ -6774,6 +6781,60 @@ def _get_itop_client():
         if _itop_mcp is None:
             _itop_mcp = MCPHTTPClient(ITOP_MCP_URL, timeout=60)
         return _itop_mcp
+
+
+_itop_trans_cache = {}
+_itop_trans_cache_lock = threading.Lock()
+
+
+def _itop_web_transitions(cls, key, status=''):
+    """v29.7.2：登录 iTop Web UI 抓取工单详情页，提取当前状态允许的流转动作。
+    定制版 iTop 状态机与标准版不同（如 assigned 只能 ev_process 接单），
+    REST API 不暴露可用 stimulus，工单详情页的工具栏按钮是权威来源。
+    结果按 (cls, key, status) 缓存 60s；任何异常返回 None（调用方降级静态映射/透传）。"""
+    if not (ITOP_WEB_URL and ITOP_WEB_USER):
+        return None
+    ckey = (cls, key, status or '')
+    now = time.time()
+    with _itop_trans_cache_lock:
+        hit = _itop_trans_cache.get(ckey)
+        if hit and now - hit[0] < 60:
+            return hit[1]
+    import urllib.request as _ureq
+    import urllib.parse as _uparse
+    import http.cookiejar as _hcj
+    base = ITOP_WEB_URL.rstrip('/') + '/'
+    try:
+        key_i = int(key)
+        opener = _ureq.build_opener(_ureq.HTTPCookieProcessor(_hcj.CookieJar()))
+        opener.addheaders = [('User-Agent', 'infra-workbench/29')]
+        data = _uparse.urlencode({'auth_user': ITOP_WEB_USER, 'auth_pwd': ITOP_WEB_PASS,
+                                  'login_mode': 'form', 'loginop': 'login'}).encode('utf-8')
+        req = _ureq.Request(base + 'pages/UI.php', data=data,
+                            headers={'Content-Type': 'application/x-www-form-urlencoded',
+                                     'User-Agent': 'infra-workbench/29'})
+        with opener.open(req, timeout=15) as r:
+            r.read()
+        url = base + 'pages/UI.php?' + _uparse.urlencode(
+            {'operation': 'details', 'class': cls, 'id': key_i})
+        req = _ureq.Request(url, headers={'User-Agent': 'infra-workbench/29'})
+        with opener.open(req, timeout=20) as r:
+            body = r.read().decode('utf-8', 'replace')
+        pairs = re.findall(
+            r'operation=stimulus&amp;stimulus=(ev_[a-z0-9_]+)&amp;class=%s&amp;id=%d"[^>]*>\s*([^<]+?)\s*</a>'
+            % (cls, key_i), body)
+        seen, out = set(), []
+        for code, label in pairs:
+            if code not in seen:
+                seen.add(code)
+                out.append({'code': code, 'label': label.strip()})
+        with _itop_trans_cache_lock:
+            if len(_itop_trans_cache) > 200:
+                _itop_trans_cache.clear()
+            _itop_trans_cache[ckey] = (now, out or None)
+        return out or None
+    except Exception:
+        return None
 
 
 def _init_itop_tables():
@@ -7206,6 +7267,35 @@ def itop_ticket_add_log(cls, ref):
         return jsonify({'error': 'iTop 写回失败：%s' % e}), 502
 
 
+@app.route('/api/itop/tickets/<cls>/<ref>/transitions')
+@login_required
+def itop_ticket_transitions(cls, ref):
+    # v29.7.2：实时获取工单当前状态可用的流转动作（登录 iTop Web 抓详情页按钮，适配定制版状态机）
+    if cls not in ITOP_CLASSES:
+        return jsonify({'error': '无效的工单类型'}), 400
+    if not re.match(r'^[A-Za-z0-9\-_]+$', ref):
+        return jsonify({'error': '无效的工单号'}), 400
+    conn = get_db()
+    row = conn.execute('SELECT * FROM itop_tickets WHERE ticket_class = ? AND ticket_ref = ?',
+                       (cls, ref)).fetchone()
+    if not row:
+        return jsonify({'error': '工单不存在，请先同步'}), 404
+    if _itop_ticket_denied(conn, row):
+        return jsonify({'error': '无权访问'}), 403
+    key = int(row['ticket_key'] or 0)
+    status = (row['status'] or '').strip()
+    trans = _itop_web_transitions(cls, key, status) if key else None
+    source = 'itop_web'
+    if trans is None:
+        # 兜底：静态映射（定制版实测结果）
+        source = 'static'
+        codes = (ITOP_STATE_STIMULI.get(cls) or {}).get(status)
+        trans = [{'code': c, 'label': ITOP_STIMULUS_LABEL.get(c, c)} for c in (codes or [])]
+        if codes is None and cls not in ITOP_STATE_STIMULI:
+            source = 'none'  # 未映射类：不限制，交 iTop 校验
+    return jsonify({'status': status, 'source': source, 'transitions': trans})
+
+
 @app.route('/api/itop/tickets/<cls>/<ref>/stimulus', methods=['POST'])
 @login_required
 def itop_ticket_apply_stimulus(cls, ref):
@@ -7229,15 +7319,24 @@ def itop_ticket_apply_stimulus(cls, ref):
         key = int(row['ticket_key'] or 0)
         if not key:
             return jsonify({'error': '工单缺少 iTop key，无法写回'}), 400
-        # v29.7.1：状态机预校验——非法动作提前拦截并给出该状态可用动作（如 assigned 须先「开始处理」）
+        # v29.7.2：优先从 iTop Web 实时拿当前状态可用动作预校验（定制版状态机权威来源）；
+        # 抓取失败才降级静态映射，都没有则透传 iTop 校验，避免误拦。
         state = (row['status'] or '').strip()
-        allowed = (ITOP_STATE_STIMULI.get(cls) or {}).get(state)
-        if allowed is not None and stimulus not in allowed:
-            if allowed:
-                names = '、'.join(f'{s}（{ITOP_STIMULUS_LABEL.get(s, s)}）' for s in allowed)
-                hint = '，请先执行「开始处理（ev_startworking）」再解决/关闭' if ('ev_startworking' in allowed and stimulus in ('ev_resolve', 'ev_close')) else ''
-                return jsonify({'error': f'工单当前状态「{state}」不支持「{stimulus}」，可用动作：{names}{hint}'}), 400
-            return jsonify({'error': f'工单当前状态「{state}」无可用流转动作（如刚同步可先点同步刷新状态）'}), 400
+        dyn = _itop_web_transitions(cls, key, state)
+        if dyn is not None:
+            codes = [t['code'] for t in dyn]
+            if stimulus not in codes:
+                if codes:
+                    names = '、'.join(f"{t['label']}（{t['code']}）" for t in dyn)
+                    return jsonify({'error': f'工单当前状态「{state}」不支持「{stimulus}」，可用动作：{names}'}), 400
+                return jsonify({'error': f'工单当前状态「{state}」无可用流转动作（可先点同步刷新状态）'}), 400
+        else:
+            allowed = (ITOP_STATE_STIMULI.get(cls) or {}).get(state)
+            if allowed is not None and stimulus not in allowed:
+                if allowed:
+                    names = '、'.join(f'{s}（{ITOP_STIMULUS_LABEL.get(s, s)}）' for s in allowed)
+                    return jsonify({'error': f'工单当前状态「{state}」不支持「{stimulus}」，可用动作：{names}'}), 400
+                return jsonify({'error': f'工单当前状态「{state}」无可用流转动作（如刚同步可先点同步刷新状态）'}), 400
         # v29.0 流转字段白名单（防误传/注入未知字段；iTop 各工单类字段不同）
         fields = data.get('fields')
         if isinstance(fields, dict):

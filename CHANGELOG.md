@@ -27,6 +27,14 @@
 ### 新增：iframe 磁贴「兼容嵌入」打开方式
 - MCP 平台等 SPA 系统在严格沙箱（无同源）下 localStorage/Cookie 不可用导致空白；`open_mode` 新增 `compat`（恢复 allow-same-origin），仅限可信内网系统使用，默认仍为严格沙箱；新建/编辑表单均可选
 
+## v29.7.2（2026-08-21）
+
+### 修复：工单流转改为实时读取 iTop 状态机（v29.7.1 仍报 Invalid stimulus 的根治）
+- **根因**：10.10.11.161 是定制版 iTop 3.0.2，状态机与标准版完全不同——实测 Incident 各状态可用动作为：`new`→分配/提交审批、`assigned`→**接单（ev_process）**/退回/撤回、`in_process`→待定/标记解决/重新分配/委外维修/手动关闭、`pending`→恢复、`waiting_for_approval`→撤回、`resolved`→关闭/重新打开；**不存在 ev_startworking**，故 v29.7.1 的「开始处理」仍被拒绝（xums 工单 I-00077258）
+- **后端**：新增 `_itop_web_transitions`——登录 iTop Web UI 抓取工单详情页工具栏按钮，实时获取当前状态允许的流转动作（60s 缓存，任何异常降级）；新增 `GET /api/itop/tickets/<cls>/<ref>/transitions` 接口；流转预校验改为实时动作优先、静态映射兜底、都没有则透传 iTop，不再误拦；静态 Incident 映射更新为定制版实测结果；新增环境变量 `ITOP_WEB_URL/ITOP_WEB_USER/ITOP_WEB_PASS`
+- **前端**：流转弹窗打开时异步拉取实时可用动作（中文标签直接来自 iTop），获取失败降级静态兜底并提示；动作清单补齐定制版动作（接单/待定/恢复/退回/撤回/提交审批/委外维修/手动关闭等）
+- 版本徽标 → v29.7.2
+
 ## v29.7.1（2026-08-21）
 
 ### 修复：iTop 工单流转按状态机过滤可用动作（assigned 工单无法解决/关闭）
