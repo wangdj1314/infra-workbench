@@ -620,7 +620,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="login-card">
     <div class="login-logo">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <h1>基础架构工作台 <span class="version-badge">v29.7</span></h1>
+      <h1>基础架构工作台 <span class="version-badge">v29.7.1</span></h1>
       <p>Infrastructure Team Workbench</p>
     </div>
     <div id="loginError" class="login-error hidden"></div>
@@ -645,7 +645,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="topbar">
     <div class="topbar-left">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" style="width:22px;height:22px"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v29.7">v29.7</span>
+      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v29.7.1">v29.7.1</span>
     </div>
     <div class="topbar-right">
       <div class="ai-token-badge" onclick="switchTab('apikey')" title="AI Token 消耗">
@@ -1375,8 +1375,31 @@ const ITOP_STATUS_LABEL = {new:'新建', assigned:'已指派', pending:'挂起',
   reject:'已拒绝', in_process:'处理中', waiting_for_approval:'待审批', implemented:'已实施',
   approved:'已审批', planned:'已计划', accepted:'已验收'};
 const ITOP_STIMULUS_OPTS = [
-  ['ev_assign','指派/受理'], ['ev_pending','挂起等待'], ['ev_resolve','标记解决'],
-  ['ev_close','关闭工单'], ['ev_reopen','重新打开'], ['ev_reassign','转派']];
+  ['ev_assign','指派/受理'], ['ev_startworking','开始处理'], ['ev_pending','挂起等待'],
+  ['ev_update','恢复处理'], ['ev_resolve','标记解决'],
+  ['ev_close','关闭工单'], ['ev_reopen','重新打开'], ['ev_reassign','转派'], ['ev_reject','拒绝']];
+// v29.7.1：UserRequest/Incident 状态机可用动作（与后端 ITOP_STATE_STIMULI 保持一致）；
+// 定制版 iTop 要求 assigned 工单先「开始处理」才能解决/关闭
+const ITOP_STATE_STIMULI = {
+  UserRequest: {
+    new: ['ev_assign','ev_reject'],
+    assigned: ['ev_startworking','ev_reassign','ev_pending'],
+    in_progress: ['ev_resolve','ev_pending','ev_reassign'],
+    pending: ['ev_update','ev_resolve','ev_reassign'],
+    resolved: ['ev_close','ev_reopen'],
+    closed: [],
+    reject: ['ev_reopen']
+  },
+  Incident: {
+    new: ['ev_assign','ev_reject'],
+    assigned: ['ev_startworking','ev_reassign','ev_pending'],
+    in_progress: ['ev_resolve','ev_pending','ev_reassign'],
+    pending: ['ev_update','ev_resolve','ev_reassign'],
+    resolved: ['ev_close','ev_reopen'],
+    closed: [],
+    reject: ['ev_reopen']
+  }
+};
 
 function itopStatusText(s){ return ITOP_STATUS_LABEL[s] || s || '-'; }
 function itopClassText(c){ return ITOP_CLASS_LABEL[c] || c || '-'; }
@@ -1542,11 +1565,21 @@ function itopApplyStimulusGo() {
   if (!cur) return;
   const raw = cur.raw || {};
   const isUr = cur.cls === 'UserRequest';
+  // v29.7.1：按工单当前状态过滤可用流转动作（未映射的类/状态保留全量，交 iTop 校验）
+  const stMap = (ITOP_STATE_STIMULI[cur.cls] || {})[cur.status];
+  const opts = stMap ? ITOP_STIMULUS_OPTS.filter(o => stMap.includes(o[0])) : ITOP_STIMULUS_OPTS;
+  if (stMap && opts.length === 0) {
+    alert(`工单当前状态「${itopStatusText(cur.status)}」无可用流转动作`);
+    return;
+  }
+  const stimSelectHtml = opts.length
+    ? `<select id="itopStimulus" onchange="onStimulusChange()">${opts.map(o => `<option value="${o[0]}">${o[1]}（${o[0]}）</option>`).join('')}</select>`
+    : `<div class="ai-hint">当前状态「${itopStatusText(cur.status)}」暂无已映射的可用动作，请先在工单页点同步刷新状态。</div>`;
   showModal(`
     <div class="modal-header"><h3>工单流转 · ${escapeHtml(cur.ref)}</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
     <div class="modal-body">
       <div class="form-row"><label>流转动作</label>
-        <select id="itopStimulus" onchange="onStimulusChange()">${ITOP_STIMULUS_OPTS.map(o => `<option value="${o[0]}">${o[1]}（${o[0]}）</option>`).join('')}</select></div>
+        ${stimSelectHtml}</div>
       <div id="resolveFields" style="display:none">
         <div class="form-row"><label>解决方式 *</label>
           <select id="resolutionCode">
@@ -1576,7 +1609,7 @@ function itopApplyStimulusGo() {
         <div id="itopExtraList"></div>
       </div>
       <div class="form-row"><label>备注（可选）</label><textarea id="itopStimComment" style="min-height:60px"></textarea></div>
-      <p class="ai-hint">动作是否可用由 iTop 当前状态（${itopStatusText(cur.status)}）决定；若 iTop 要求补充必填字段，会在此弹窗中动态出现。</p>
+      <p class="ai-hint">上方仅列出当前状态（${itopStatusText(cur.status)}）可执行的动作；如已指派未开工，请先选「开始处理」再标记解决。若 iTop 要求补充必填字段，会在此弹窗中动态出现。</p>
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">取消</button>
@@ -1587,7 +1620,9 @@ function itopApplyStimulusGo() {
 }
 
 function onStimulusChange() {
-  const stim = document.getElementById('itopStimulus').value;
+  const sel = document.getElementById('itopStimulus');
+  if (!sel) return;
+  const stim = sel.value;
   const show = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? 'block' : 'none'; };
   show('resolveFields', stim === 'ev_resolve');
   show('pendingFields', stim === 'ev_pending');
@@ -1609,7 +1644,9 @@ function renderStimulusExtraFields(needFields) {
 async function itopSubmitStimulus() {
   const cur = window._itopCur;
   if (!cur) return;
-  const stim = document.getElementById('itopStimulus').value;
+  const sel = document.getElementById('itopStimulus');
+  if (!sel) { alert('当前状态无可用流转动作'); return; }
+  const stim = sel.value;
   const cmt = document.getElementById('itopStimComment').value.trim();
   const body = { stimulus: stim, comment: cmt || 'infra-workbench v29' };
   const fields = {};

@@ -27,6 +27,14 @@
 ### 新增：iframe 磁贴「兼容嵌入」打开方式
 - MCP 平台等 SPA 系统在严格沙箱（无同源）下 localStorage/Cookie 不可用导致空白；`open_mode` 新增 `compat`（恢复 allow-same-origin），仅限可信内网系统使用，默认仍为严格沙箱；新建/编辑表单均可选
 
+## v29.7.1（2026-08-21）
+
+### 修复：iTop 工单流转按状态机过滤可用动作（assigned 工单无法解决/关闭）
+- **根因**（v28.9/v29.0 工单系列的延续）：定制版 iTop 状态机要求 `assigned`（已指派）工单先执行 `ev_startworking`（开始处理，进入 in_progress）才能 `ev_resolve`/`ev_close`，而流转弹窗下拉从未提供「开始处理」动作，也不按工单当前状态过滤选项，导致 assigned 工单选任何动作都被 iTop 报 `Invalid stimulus` 拒绝（xums 工单流转失败即此）
+- **前端**：流转动作补齐 `ev_startworking`（开始处理）、`ev_update`（恢复处理）、`ev_reject`（拒绝）；下拉按工单当前状态过滤可用动作（UserRequest/Incident 状态机映射），状态无可用动作时直接提示；提示文案引导「已指派未开工先开始处理」
+- **后端**：新增 `ITOP_STATE_STIMULI`/`ITOP_STIMULUS_LABEL` 映射，流转前按状态预校验，非法动作提前拦截并返回该状态可用动作清单（含「先开始处理」引导）；Problem/Change 等未映射类/状态仍透传 iTop 校验，避免误拦
+- 版本徽标同步迭代至 v29.7.1（登录页 + 顶栏）
+
 ## v29.7（2026-08-21）
 
 ### 新增：工作项筛选增强 + AI 语义搜索

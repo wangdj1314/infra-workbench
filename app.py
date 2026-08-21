@@ -6719,6 +6719,34 @@ def list_knowledge():
 ITOP_MCP_URL = os.environ.get('ITOP_MCP_URL', 'http://YOUR_SERVER_IP:8003/mcp')
 ITOP_CLASSES = ('UserRequest', 'Incident', 'Problem', 'Change')
 ITOP_CLOSED_STATUSES = ('resolved', 'closed', 'reject')
+# v29.7.1：UserRequest/Incident 状态机可用动作映射（定制版 iTop：assigned 须先 ev_startworking
+# 才能解决/关闭；此前下拉缺该动作导致 assigned 工单所有流转被 iTop 拒绝）。
+# 仅对已知工单类+已知状态预校验，未列出的类/状态仍透传 iTop 校验，避免误拦。
+ITOP_STIMULUS_LABEL = {
+    'ev_assign': '指派/受理', 'ev_startworking': '开始处理', 'ev_pending': '挂起等待',
+    'ev_update': '恢复处理', 'ev_resolve': '标记解决', 'ev_close': '关闭工单',
+    'ev_reopen': '重新打开', 'ev_reassign': '转派', 'ev_reject': '拒绝',
+}
+ITOP_STATE_STIMULI = {
+    'UserRequest': {
+        'new': ['ev_assign', 'ev_reject'],
+        'assigned': ['ev_startworking', 'ev_reassign', 'ev_pending'],
+        'in_progress': ['ev_resolve', 'ev_pending', 'ev_reassign'],
+        'pending': ['ev_update', 'ev_resolve', 'ev_reassign'],
+        'resolved': ['ev_close', 'ev_reopen'],
+        'closed': [],
+        'reject': ['ev_reopen'],
+    },
+    'Incident': {
+        'new': ['ev_assign', 'ev_reject'],
+        'assigned': ['ev_startworking', 'ev_reassign', 'ev_pending'],
+        'in_progress': ['ev_resolve', 'ev_pending', 'ev_reassign'],
+        'pending': ['ev_update', 'ev_resolve', 'ev_reassign'],
+        'resolved': ['ev_close', 'ev_reopen'],
+        'closed': [],
+        'reject': ['ev_reopen'],
+    },
+}
 # v29.0 工单流转可提交字段白名单（各工单类字段不同，iTop 端会二次校验）
 ITOP_STIMULUS_FIELD_WHITELIST = frozenset({
     'resolution_code', 'solution', 'difficulty_level', 'pending_reason',
@@ -7201,6 +7229,15 @@ def itop_ticket_apply_stimulus(cls, ref):
         key = int(row['ticket_key'] or 0)
         if not key:
             return jsonify({'error': '工单缺少 iTop key，无法写回'}), 400
+        # v29.7.1：状态机预校验——非法动作提前拦截并给出该状态可用动作（如 assigned 须先「开始处理」）
+        state = (row['status'] or '').strip()
+        allowed = (ITOP_STATE_STIMULI.get(cls) or {}).get(state)
+        if allowed is not None and stimulus not in allowed:
+            if allowed:
+                names = '、'.join(f'{s}（{ITOP_STIMULUS_LABEL.get(s, s)}）' for s in allowed)
+                hint = '，请先执行「开始处理（ev_startworking）」再解决/关闭' if ('ev_startworking' in allowed and stimulus in ('ev_resolve', 'ev_close')) else ''
+                return jsonify({'error': f'工单当前状态「{state}」不支持「{stimulus}」，可用动作：{names}{hint}'}), 400
+            return jsonify({'error': f'工单当前状态「{state}」无可用流转动作（如刚同步可先点同步刷新状态）'}), 400
         # v29.0 流转字段白名单（防误传/注入未知字段；iTop 各工单类字段不同）
         fields = data.get('fields')
         if isinstance(fields, dict):
