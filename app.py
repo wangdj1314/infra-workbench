@@ -6802,7 +6802,7 @@ def _itop_options():
     }.items():
         try:
             rows, page = [], 1
-            while page <= 10:
+            while page <= 20:
                 res = client.call_json('run_oql', {
                     'oql': oql, 'output_fields': 'id,friendlyname',
                     'limit': 200, 'page': page})
