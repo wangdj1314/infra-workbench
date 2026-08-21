@@ -2032,7 +2032,9 @@ function showMilestoneModal(itemId) {
     <div class="modal-header"><h3>登记里程碑状态</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
     <div class="modal-body">
       <div class="form-row">
-        <label>当前状态 <span style="color:var(--danger)">*</span></label>
+        <label>当前状态 <span style="color:var(--danger)">*</span>
+          <button type="button" class="btn btn-sm" id="aiMsSummaryBtn" onclick="aiMilestoneSummary(${itemId})" style="font-size:11px;padding:2px 8px;margin-left:8px">AI 总结</button>
+        </label>
         <input type="text" id="msLabel" placeholder="如：方案已确认、等待厂商发货、联调中…">
       </div>
       <div class="form-row">
@@ -2042,8 +2044,16 @@ function showMilestoneModal(itemId) {
         </div>
       </div>
       <div class="form-row">
-        <label>补充说明（可选） <button type="button" class="btn btn-sm" id="aiMsNoteBtn" onclick="aiMilestoneNote(${itemId})" style="font-size:11px;padding:2px 8px;margin-left:8px">AI 补充</button></label>
+        <label>补充说明（可选）
+          <button type="button" class="btn btn-sm" id="aiMsNoteBtn" onclick="aiMilestoneNote(${itemId})" style="font-size:11px;padding:2px 8px;margin-left:8px">AI 补充</button>
+          <button type="button" class="btn btn-sm" id="aiMsPolishBtn" onclick="aiMsNotePolish()" style="font-size:11px;padding:2px 8px;margin-left:4px">AI 润色</button>
+        </label>
         <textarea id="msNote" placeholder="如：预计下周二到货，已通知业务部门…"></textarea>
+        <div id="msPolishResult" style="display:none;margin-top:8px">
+          <label style="font-size:12px;color:var(--muted)">AI 润色结果（确认无误后填入）</label>
+          <textarea id="msPolishArea" style="min-height:70px;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px;line-height:1.6;resize:vertical;margin-top:4px;width:100%"></textarea>
+          <button type="button" class="btn btn-sm btn-primary-sm" id="msPolishFillBtn" onclick="fillMsPolish()" style="margin-top:6px;display:none">📥 填入说明</button>
+        </div>
       </div>
     </div>
     <div class="modal-footer">
@@ -2073,6 +2083,7 @@ async function aiMilestoneNote(itemId) {
   const btn = document.getElementById('aiMsNoteBtn');
   const label = document.getElementById('msLabel').value.trim();
   if (!label) { alert('请先填写当前状态'); return; }
+  if (document.getElementById('msNote').value.trim()) { alert('补充说明已有内容，请使用「AI 润色」'); return; }
   btn.disabled = true; btn.textContent = '生成中...';
   try {
     const item = await api('/api/work-items/' + itemId);
@@ -2084,6 +2095,58 @@ async function aiMilestoneNote(itemId) {
     loadAiUsage();
   } catch(err) { alert('AI 生成失败：' + err.message); }
   finally { btn.disabled = false; btn.textContent = 'AI 补充'; }
+}
+
+// v29.6：AI 总结——根据已填内容或补充说明生成一句话「当前状态」
+async function aiMilestoneSummary(itemId) {
+  const btn = document.getElementById('aiMsSummaryBtn');
+  const label = document.getElementById('msLabel').value.trim();
+  const note = document.getElementById('msNote').value.trim();
+  if (!label && !note) { alert('请先填写当前状态或补充说明'); return; }
+  btn.disabled = true; btn.textContent = '生成中...';
+  try {
+    const item = await api('/api/work-items/' + itemId);
+    const data = await api('/api/ai/chat', {method:'POST', body:JSON.stringify({
+      prompt: `根据任务「${item.title}」的进展信息，总结出一句里程碑状态（20字以内的名词性短语，如「方案已确认」「厂商发货中，联调待开始」），不要句号结尾，不要任何解释。\n当前状态：${label || '（未填写）'}\n补充说明：${note || '（未填写）'}`,
+      feature: 'ms_summary'
+    })});
+    const s = (data.reply || '').trim().replace(/^["“]+|["”]+$/g, '').replace(/[。\.]+$/, '');
+    if (s) document.getElementById('msLabel').value = s.slice(0, 40);
+    loadAiUsage();
+  } catch(err) { alert('AI 总结失败：' + err.message); }
+  finally { btn.disabled = false; btn.textContent = 'AI 总结'; }
+}
+
+// v29.6：AI 润色——补充说明已有内容时润色，结果确认后填入（同完成说明润色流程）
+async function aiMsNotePolish() {
+  const text = (document.getElementById('msNote').value || '').trim();
+  if (!text) { alert('补充说明为空，请先填写或使用「AI 补充」'); return; }
+  const btn = document.getElementById('aiMsPolishBtn');
+  const resultDiv = document.getElementById('msPolishResult');
+  const polishArea = document.getElementById('msPolishArea');
+  btn.disabled = true; btn.textContent = '润色中...';
+  try {
+    resultDiv.style.display = 'block';
+    polishArea.value = 'AI 润色中...';
+    document.getElementById('msPolishFillBtn').style.display = 'none';
+    const data = await api('/api/ai/chat', {method:'POST', body:JSON.stringify({
+      prompt: `请对以下项目里程碑补充说明进行润色，使其更专业、简洁、条理清晰，直接输出润色后的正文（不要加标题、不要加额外说明）：\n\n${text}`,
+      feature: 'ms_polish'
+    })});
+    polishArea.value = data.reply || text;
+    document.getElementById('msPolishFillBtn').style.display = '';
+    loadAiUsage();
+  } catch(err) {
+    resultDiv.style.display = 'none';
+    alert('AI 润色失败：' + err.message);
+  } finally { btn.disabled = false; btn.textContent = 'AI 润色'; }
+}
+function fillMsPolish() {
+  const polishArea = document.getElementById('msPolishArea');
+  if (!polishArea.value.trim()) return;
+  document.getElementById('msNote').value = polishArea.value.trim();
+  const btn = document.getElementById('msPolishFillBtn');
+  btn.textContent = '✅ 已填入'; setTimeout(() => btn.textContent = '📥 填入说明', 1500);
 }
 
 async function deleteMilestone(itemId, msId) {
@@ -4514,7 +4577,7 @@ async function loadAiUsage() {
       data.by_feature.forEach(f => {
         const labels = {describe:'生成描述', decompose:'任务分解', suggest:'工作建议', analysis:'工作分析',
       report_daily:'日报', report_weekly:'周报', report_monthly:'月报', report:'报告',
-      mcp_doc:'MCP部署文档', job_analysis:'岗位分析', report_edit:'报告润色', complete_polish:'完成说明润色', edit_polish:'编辑润色', comm_suggest:'沟通建议',
+      mcp_doc:'MCP部署文档', job_analysis:'岗位分析', report_edit:'报告润色', complete_polish:'完成说明润色', edit_polish:'编辑润色', comm_suggest:'沟通建议', ms_summary:'里程碑总结', ms_polish:'里程碑润色',
       chat:'AI对话', unknown:'其他'};
         html += `<div class="sb-stat-row"><span>${labels[f.feature]||f.feature} (${f.calls}次)</span><span style="font-size:13px">${f.tokens} tokens</span></div>`;
       });
