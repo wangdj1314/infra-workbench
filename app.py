@@ -2383,6 +2383,35 @@ def add_milestone(item_id):
     return jsonify(dict(row)), 201
 
 
+@app.route('/api/work-items/<int:item_id>/milestones/<int:ms_id>', methods=['PUT'])
+@login_required
+def update_milestone(item_id, ms_id):
+    """v29.6：编辑里程碑记录（管理员或登记人本人）"""
+    db = get_db()
+    ms = db.execute('SELECT * FROM work_item_milestones WHERE id = ? AND work_item_id = ?', (ms_id, item_id)).fetchone()
+    if not ms:
+        return jsonify({'error': '里程碑记录不存在'}), 404
+    if not session.get('is_admin') and ms['user_id'] != session['user_id']:
+        return jsonify({'error': '无权编辑'}), 403
+    data = request.get_json(silent=True) or {}
+    status_label = (data.get('status_label') or '').strip()
+    if not status_label:
+        return jsonify({'error': '请填写里程碑状态'}), 400
+    note = (data.get('note') or '').strip()
+    now = _now_str()
+    db.execute('UPDATE work_item_milestones SET status_label = ?, note = ? WHERE id = ?', (status_label, note, ms_id))
+    # 联动刷新工作项更新时间，与登记里程碑行为保持一致
+    db.execute('UPDATE work_items SET updated_at = ? WHERE id = ?', (now, item_id))
+    db.execute('INSERT INTO work_logs (user_id, action, item_id, detail) VALUES (?, ?, ?, ?)',
+               (session['user_id'], 'milestone', item_id, f'编辑里程碑：{status_label}'))
+    db.commit()
+    row = db.execute(
+        'SELECT m.*, u.display_name FROM work_item_milestones m JOIN users u ON m.user_id = u.id WHERE m.id = ?',
+        (ms_id,)
+    ).fetchone()
+    return jsonify(dict(row))
+
+
 @app.route('/api/work-items/<int:item_id>/milestones/<int:ms_id>', methods=['DELETE'])
 @login_required
 def delete_milestone(item_id, ms_id):

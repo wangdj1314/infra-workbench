@@ -288,6 +288,8 @@ input,select,textarea{font-family:inherit;font-size:14px}
 .milestone-meta{color:var(--muted);font-size:11px;margin-top:3px;font-variant-numeric:tabular-nums}
 .milestone-del{width:18px;height:18px;border-radius:4px;display:flex;align-items:center;justify-content:center;background:transparent;color:var(--muted);font-size:11px;cursor:pointer;flex-shrink:0;margin-top:1px}
 .milestone-del:hover{background:rgba(248,81,73,.15);color:var(--danger)}
+.milestone-edit{width:18px;height:18px;border-radius:4px;display:flex;align-items:center;justify-content:center;background:transparent;color:var(--muted);font-size:11px;cursor:pointer;flex-shrink:0;margin-top:1px}
+.milestone-edit:hover{background:rgba(88,166,255,.15);color:var(--primary)}
 .ms-chip{display:inline-flex;align-items:center;padding:4px 10px;border-radius:12px;font-size:12px;background:var(--bg);border:1px solid var(--border);color:var(--text);cursor:pointer;transition:all .15s}
 .ms-chip:hover{border-color:var(--primary);background:rgba(88,166,255,.1)}
 .ms-chip.active{border-color:var(--primary);background:rgba(88,166,255,.15);font-weight:600}
@@ -2003,6 +2005,7 @@ async function loadMilestones(itemId) {
   if (!el) return;
   try {
     const rows = await api(`/api/work-items/${itemId}/milestones`);
+    _msCache[itemId] = rows || [];
     if (!rows || rows.length === 0) { el.innerHTML = ''; return; }
     el.innerHTML = '<div class="milestone-list-title">里程碑状态</div>' + rows.map(m => {
       const canDel = currentUser && (currentUser.is_admin || m.user_id === currentUser.id);
@@ -2012,7 +2015,7 @@ async function loadMilestones(itemId) {
           <div class="milestone-label">${escapeHtml(m.status_label)}<span class="milestone-meta">${escapeHtml(m.display_name || m.created_by || '')} · ${formatTime(m.created_at)}</span></div>
           ${m.note ? `<div class="milestone-note">${escapeHtml(m.note)}</div>` : ''}
         </div>
-        ${canDel ? `<button class="milestone-del" onclick="deleteMilestone(${itemId}, ${m.id})" title="删除">×</button>` : ''}
+        ${canDel ? `<span style="display:flex;flex-shrink:0"><button class="milestone-edit" onclick="showMilestoneModal(${itemId}, ${m.id})" title="编辑">✎</button><button class="milestone-del" onclick="deleteMilestone(${itemId}, ${m.id})" title="删除">×</button></span>` : ''}
       </div>`;
     }).join('');
   } catch {}
@@ -2026,16 +2029,21 @@ function setMilestoneChip(btn) {
   input.value = btn.dataset.value;
 }
 
-function showMilestoneModal(itemId) {
+// v29.6：里程碑列表缓存（编辑时回填用）
+let _msCache = {};
+
+function showMilestoneModal(itemId, msId) {
   const presets = ['方案确认', '等待厂商', '联调中', '测试通过', '客户确认'];
+  // 编辑模式：从缓存回填已登记的状态与说明
+  const editMs = msId ? (_msCache[itemId] || []).find(m => m.id === msId) : null;
   showModal(`
-    <div class="modal-header"><h3>登记里程碑状态</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-header"><h3>${editMs ? '编辑里程碑状态' : '登记里程碑状态'}</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
     <div class="modal-body">
       <div class="form-row">
         <label>当前状态 <span style="color:var(--danger)">*</span>
           <button type="button" class="btn btn-sm" id="aiMsSummaryBtn" onclick="aiMilestoneSummary(${itemId})" style="font-size:11px;padding:2px 8px;margin-left:8px">AI 总结</button>
         </label>
-        <input type="text" id="msLabel" placeholder="如：方案已确认、等待厂商发货、联调中…">
+        <input type="text" id="msLabel" placeholder="如：方案已确认、等待厂商发货、联调中…" value="${editMs ? escapeHtml(editMs.status_label) : ''}">
       </div>
       <div class="form-row">
         <label>快速选择</label>
@@ -2048,7 +2056,7 @@ function showMilestoneModal(itemId) {
           <button type="button" class="btn btn-sm" id="aiMsNoteBtn" onclick="aiMilestoneNote(${itemId})" style="font-size:11px;padding:2px 8px;margin-left:8px">AI 补充</button>
           <button type="button" class="btn btn-sm" id="aiMsPolishBtn" onclick="aiMsNotePolish()" style="font-size:11px;padding:2px 8px;margin-left:4px">AI 润色</button>
         </label>
-        <textarea id="msNote" placeholder="如：预计下周二到货，已通知业务部门…"></textarea>
+        <textarea id="msNote" placeholder="如：预计下周二到货，已通知业务部门…">${editMs ? escapeHtml(editMs.note || '') : ''}</textarea>
         <div id="msPolishResult" style="display:none;margin-top:8px">
           <label style="font-size:12px;color:var(--muted)">AI 润色结果（确认无误后填入）</label>
           <textarea id="msPolishArea" style="min-height:70px;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px;line-height:1.6;resize:vertical;margin-top:4px;width:100%"></textarea>
@@ -2058,19 +2066,26 @@ function showMilestoneModal(itemId) {
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">取消</button>
-      <button class="btn btn-primary-sm" onclick="submitMilestone(${itemId})">保存</button>
+      <button class="btn btn-primary-sm" onclick="submitMilestone(${itemId}, ${msId || 'null'})">${editMs ? '保存修改' : '保存'}</button>
     </div>
   `);
+  // 编辑模式下高亮匹配的快速选择按钮
+  if (editMs) {
+    document.querySelectorAll('.ms-chip').forEach(c => { if (c.dataset.value === editMs.status_label) c.classList.add('active'); });
+  }
 }
 
-async function submitMilestone(itemId) {
+async function submitMilestone(itemId, msId) {
   const label = document.getElementById('msLabel').value.trim();
   if (!label) { alert('请填写里程碑状态'); return; }
+  const payload = { status_label: label, note: document.getElementById('msNote').value.trim() };
   try {
-    await api(`/api/work-items/${itemId}/milestones`, {
-      method: 'POST',
-      body: JSON.stringify({ status_label: label, note: document.getElementById('msNote').value.trim() })
-    });
+    // v29.6：带 msId 走编辑（PUT），否则新增（POST）
+    if (msId) {
+      await api(`/api/work-items/${itemId}/milestones/${msId}`, { method: 'PUT', body: JSON.stringify(payload) });
+    } else {
+      await api(`/api/work-items/${itemId}/milestones`, { method: 'POST', body: JSON.stringify(payload) });
+    }
     closeModal();
     loadMilestones(itemId);
     loadSidebar();
