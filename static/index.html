@@ -244,6 +244,10 @@ input,select,textarea{font-family:inherit;font-size:14px}
 
 /* ---- Filter ---- */
 .filter-bar{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+.ai-search-box{display:flex;gap:6px;margin-left:auto}
+.ai-search-box input{padding:6px 12px;border-radius:6px;background:var(--surface2);color:var(--text);border:1px solid var(--border);font-size:13px;min-width:200px}
+.ai-search-tip{display:flex;align-items:center;gap:8px;background:rgba(88,166,255,.08);border:1px solid rgba(88,166,255,.3);border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12px;color:var(--text)}
+.ai-search-tip .btn{margin-left:auto}
 .filter-btn{padding:6px 14px;border-radius:20px;font-size:13px;background:var(--surface2);color:var(--muted);border:1px solid var(--border)}
 .filter-btn.active{background:var(--primary);color:#fff;border-color:var(--primary)}
 .filter-select{padding:6px 12px;border-radius:6px;background:var(--surface2);color:var(--text);border:1px solid var(--border);font-size:13px}
@@ -716,6 +720,15 @@ input,select,textarea{font-family:inherit;font-size:14px}
             <button class="filter-btn" data-status="pending" onclick="filterMyItems('pending')">待处理</button>
             <button class="filter-btn" data-status="in_progress" onclick="filterMyItems('in_progress')">进行中</button>
             <button class="filter-btn" data-status="completed" onclick="filterMyItems('completed')">已完成</button>
+            <select class="filter-select" id="myCategoryFilter" onchange="loadDashboard()"><option value="">全部类别</option></select>
+            <select class="filter-select" id="myPriorityFilter" onchange="loadDashboard()">
+              <option value="">全部优先级</option>
+              <option value="P0">P0（紧急）</option><option value="P1">P1（高）</option><option value="P2">P2（中）</option><option value="P3">P3（低）</option>
+            </select>
+            <div class="ai-search-box">
+              <input type="text" id="myAiSearch" placeholder="AI 搜索工作项，如：上周那个服务器的事" onkeydown="if(event.key==='Enter')runAiSearch('my')">
+              <button class="btn btn-ai" id="myAiSearchBtn" onclick="runAiSearch('my')">🔍 AI 搜索</button>
+            </div>
           </div>
           <div id="myWorkItems"></div>
         </div>
@@ -820,6 +833,15 @@ input,select,textarea{font-family:inherit;font-size:14px}
               <option value="in_progress">进行中</option>
               <option value="completed">已完成</option>
             </select>
+            <select class="filter-select" id="filterCategoryAdmin" onchange="loadAdminWorkItems()"><option value="">全部类别</option></select>
+            <select class="filter-select" id="filterPriorityAdmin" onchange="loadAdminWorkItems()">
+              <option value="">全部优先级</option>
+              <option value="P0">P0（紧急）</option><option value="P1">P1（高）</option><option value="P2">P2（中）</option><option value="P3">P3（低）</option>
+            </select>
+            <div class="ai-search-box">
+              <input type="text" id="adminAiSearch" placeholder="AI 搜索工作项，如：谁在跟进堡垒机" onkeydown="if(event.key==='Enter')runAiSearch('admin')">
+              <button class="btn btn-ai" id="adminAiSearchBtn" onclick="runAiSearch('admin')">🔍 AI 搜索</button>
+            </div>
           </div>
           <div id="adminWorkItems"></div>
         </div>
@@ -984,6 +1006,9 @@ input,select,textarea{font-family:inherit;font-size:14px}
 // ---- State ----
 let currentUser = null;
 let myItemFilter = 'all';
+// v29.7：AI 搜索结果过滤（null=未激活）
+let myAiFilterIds = null, adminAiFilterIds = null;
+let myAiSearchState = null, adminAiSearchState = null;
 let membersCache = [];
 let categoriesCache = [];
 let editItemCache = null;
@@ -1226,15 +1251,81 @@ async function loadDashboard() {
     if (membersCache.length === 0) {
       try { membersCache = await api('/api/team/members'); } catch {}
     }
+    fillCategoryFilter('myCategoryFilter');
     const [stats, items] = await Promise.all([
       api('/api/stats'),
-      api('/api/work-items?scope=personal&status=' + (myItemFilter === 'all' ? '' : myItemFilter))
+      api('/api/work-items?scope=personal&status=' + (myItemFilter === 'all' ? '' : myItemFilter) + extraFilterParams('myCategoryFilter', 'myPriorityFilter'))
     ]);
     renderStats('myStats', stats);
-    renderWorkItems('myWorkItems', items, false);
+    // v29.7：AI 搜索结果过滤
+    let list = items;
+    if (myAiFilterIds) list = items.filter(i => myAiFilterIds.includes(i.id));
+    renderWorkItems('myWorkItems', list, false);
+    renderAiSearchTip('myWorkItems', myAiSearchState, 'my');
   } catch(err) {
     document.getElementById('myWorkItems').innerHTML = `<div class="empty"><p>加载失败: ${err.message}</p></div>`;
   }
+}
+
+// v29.7：分类/优先级筛选参数拼接
+function extraFilterParams(catSelId, priSelId) {
+  let s = '';
+  const cat = document.getElementById(catSelId);
+  const pri = document.getElementById(priSelId);
+  if (cat && cat.value) s += '&category=' + encodeURIComponent(cat.value);
+  if (pri && pri.value) s += '&priority=' + encodeURIComponent(pri.value);
+  return s;
+}
+
+// v29.7：填充分类筛选下拉（保留当前选中值）
+function fillCategoryFilter(selId) {
+  const sel = document.getElementById(selId);
+  if (!sel || !categoriesCache.length) return;
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">全部类别</option>' + categoriesCache.map(c =>
+    `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`
+  ).join('');
+  sel.value = categoriesCache.some(c => c.name === cur) ? cur : '';
+}
+
+// v29.7：AI 搜索工作项（scope: my=个人工作台, admin=工作内容管理）
+async function runAiSearch(scope) {
+  const isAdmin = scope === 'admin';
+  const input = document.getElementById(isAdmin ? 'adminAiSearch' : 'myAiSearch');
+  const btn = document.getElementById(isAdmin ? 'adminAiSearchBtn' : 'myAiSearchBtn');
+  const q = input.value.trim();
+  if (!q) { alert('请输入搜索内容'); return; }
+  btn.disabled = true; btn.textContent = '🔍 AI 搜索中...';
+  try {
+    const data = await api('/api/ai/search-items', {method:'POST', body:JSON.stringify({q, scope: isAdmin ? '' : 'personal'})});
+    const state = {q, matches: data.matches || [], message: data.message || ''};
+    if (isAdmin) { adminAiFilterIds = data.ids; adminAiSearchState = state; await loadAdminWorkItems(); }
+    else { myAiFilterIds = data.ids; myAiSearchState = state; await loadDashboard(); }
+  } catch(err) { alert('AI 搜索失败: ' + err.message); }
+  finally { btn.disabled = false; btn.textContent = '🔍 AI 搜索'; }
+}
+
+function clearAiSearch(scope) {
+  if (scope === 'admin') {
+    adminAiFilterIds = null; adminAiSearchState = null;
+    const i = document.getElementById('adminAiSearch'); if (i) i.value = '';
+    loadAdminWorkItems();
+  } else {
+    myAiFilterIds = null; myAiSearchState = null;
+    const i = document.getElementById('myAiSearch'); if (i) i.value = '';
+    loadDashboard();
+  }
+}
+
+// v29.7：AI 搜索结果提示条（插在列表顶部）
+function renderAiSearchTip(elId, state, scope) {
+  const el = document.getElementById(elId);
+  if (!el || !state) return;
+  const n = (state.matches || []).length;
+  let tip = `<div class="ai-search-tip"><span>🔍 AI 搜索“${escapeHtml(state.q)}”：`;
+  tip += n === 0 ? escapeHtml(state.message || '未找到相关工作项') : `找到 ${n} 条相关工作项`;
+  tip += `</span><button class="btn btn-sm" onclick="clearAiSearch('${scope}')">清除搜索</button></div>`;
+  el.insertAdjacentHTML('afterbegin', tip);
 }
 
 function filterMyItems(status) {
@@ -4321,12 +4412,17 @@ async function loadAdminWorkItems() {
     }
     const memberId = sel ? sel.value : '';
     const status = document.getElementById('filterStatusAdmin').value;
+    fillCategoryFilter('filterCategoryAdmin');
     let url = '/api/work-items?';
     if (teamId && !memberId) url += `team_id=${teamId}&`;
     if (memberId) url += `user_id=${memberId}&`;
     if (status && status !== 'all') url += `status=${status}&`;
-    const items = await api(url);
+    url += extraFilterParams('filterCategoryAdmin', 'filterPriorityAdmin').replace(/^&/, '');
+    let items = await api(url);
+    // v29.7：AI 搜索结果过滤
+    if (adminAiFilterIds) items = items.filter(i => adminAiFilterIds.includes(i.id));
     renderWorkItems('adminWorkItems', items, true);
+    renderAiSearchTip('adminWorkItems', adminAiSearchState, 'admin');
   } catch(err) {
     document.getElementById('adminWorkItems').innerHTML = `<div class="empty"><p>加载失败: ${err.message}</p></div>`;
   }

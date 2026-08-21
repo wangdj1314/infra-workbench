@@ -812,7 +812,16 @@ def ai_daily_suggest():
         (uid, week_ago)
     ).fetchall()
     chat_rows = _filter_chat_records(chat_rows, uid, db)
-    chat_topics = list(dict.fromkeys([r['title'][:30] for r in chat_rows if r['title']]))[:10]
+    # v29.7：主题标注收发方向（我发出=本人发送，收到=接收），让 AI 区分是谁的诉求
+    my_row = db.execute('SELECT display_name FROM users WHERE id = ?', (uid,)).fetchone()
+    my_name = (my_row['display_name'] or '').strip() if my_row else ''
+    chat_topics = []
+    for r in chat_rows:
+        if not r['title']:
+            continue
+        tag = '我发出' if _is_my_message(r.get('content') or '', my_name) else '收到'
+        chat_topics.append(f"{r['title'][:30]}（{tag}）")
+    chat_topics = list(dict.fromkeys(chat_topics))[:10]
     # v25.7-fix：待办过滤已完成的（钉钉待办 content 含「状态：已完成」）
     todo_rows = db.execute(
         "SELECT title, content FROM user_knowledge WHERE user_id=? AND source='dingtalk_todo' AND occur_date>=? ORDER BY event_time DESC LIMIT 15",
@@ -855,7 +864,7 @@ def ai_daily_suggest():
     summary = f"总任务{len(items)}条，待处理{len(pending)}条，逾期{len(overdue)}条，已完成{len(completed)}条。\n"
     summary += f"效率指标：平均完成耗时{round(avg_dur,1)}分钟，1小时内完成{fast_count}条，超8小时完成{slow_count}条。\n"
     if chat_topics:
-        summary += f"近期高频对话主题（近7天）：{'；'.join(chat_topics)}\n"
+        summary += f"近期高频对话主题（近7天，方向：我发出=本人发送/收到=接收）：{'；'.join(chat_topics)}\n"
     if todo_titles:
         summary += f"近期待办（近7天）：{'；'.join(todo_titles)}\n"
     if cal_titles:
@@ -874,6 +883,7 @@ def ai_daily_suggest():
         summary += f"- [{p['priority']}] {p['title']}（截止{p['due_date'] or '无'}）\n"
     system = (
         '你是基础架构运维团队的工作建议助手。根据用户当前的工作项、效率指标、近期聊天记录主题、待办和日程密度，给出 3~5 条具体、可操作的工作建议。'
+        '对话主题中的方向标注（我发出/收到）表示该消息是本人发送还是接收到的，分析时注意区分是谁的诉求。'
         '如果平均耗时较长或逾期较多，重点给出时间管理和任务拆分建议；如果日程密集，建议预留缓冲时间，并对周期性会议（如周例会）基于其具体日期给出会议时间优化建议。'
         '直接输出建议，每条用序号标注，不要客套话。'
     )
@@ -897,7 +907,10 @@ def ai_comm_suggest():
     ).fetchall()
     if not chat_rows:
         return jsonify({'suggestion': '暂无近期聊天记录，请先在「知识库」绑定钉钉并同步后再试。'})
-    # 组装会话素材：会话名 + 时间 + 内容（单条截断、总量控制，防止超 token）
+    # v29.7：标注消息收发方向，避免 AI 把对方的话当成用户的承诺
+    my_row = db.execute('SELECT display_name FROM users WHERE id = ?', (uid,)).fetchone()
+    my_name = (my_row['display_name'] or '').strip() if my_row else ''
+    # 组装会话素材：会话名 + 时间 + 方向 + 内容（单条截断、总量控制，防止超 token）
     parts = []
     total = 0
     for r in chat_rows:
@@ -906,7 +919,8 @@ def ai_comm_suggest():
             continue
         if len(content) > 500:
             content = content[:500] + '…（已截断）'
-        block = f"【{r['title'] or '未知会话'}】{r['event_time'] or ''}\n{content}"
+        direction = '我发出' if _is_my_message(content, my_name) else '对方发出'
+        block = f"【{r['title'] or '未知会话'}】{r['event_time'] or ''}（{direction}）\n{content}"
         if total + len(block) > 6000:
             break
         parts.append(block)
@@ -914,8 +928,11 @@ def ai_comm_suggest():
     if not parts:
         return jsonify({'suggestion': '聊天记录内容为空，无法分析。'})
     system = (
-        '你是企业内部沟通教练。下面是用户近期从钉钉同步的聊天记录（含发送人与消息内容，部分可能被截断）。请分析沟通现状：'
-        '1) 识别待回复/待确认/有潜在风险的事项；2) 针对每个事项给出可直接使用的话术建议（如何开场、要点表达、收尾诉求），语气专业简洁；'
+        f'你是企业内部沟通教练。当前用户是「{my_name or "该用户"}」。下面是用户近期从钉钉同步的聊天记录，每条均标注了方向：'
+        '「我发出」= 用户本人发送的消息，「对方发出」= 用户接收到的消息；内容含发送人与消息正文，部分可能被截断。'
+        '分析时务必区分哪些话是用户说的、哪些是对方说的，不要把对方的表态当成用户的承诺或任务。请分析沟通现状：'
+        '1) 识别待回复/待确认/有潜在风险的事项（重点是对方发给用户、但用户尚未回应的问题与请求）；'
+        '2) 针对每个事项给出可直接使用的话术建议（如何开场、要点表达、收尾诉求），语气专业简洁；'
         '3) 如发现可改进的沟通习惯（表达方式、回复时机等）附一条简短建议。直接按序号输出，不要客套话。'
     )
     try:
@@ -923,6 +940,67 @@ def ai_comm_suggest():
         return jsonify({'suggestion': suggestion})
     except Exception as e:
         return jsonify({'error': f'AI 生成沟通建议失败: {e}'}), 502
+
+
+@app.route('/api/ai/search-items', methods=['POST'])
+@login_required
+def ai_search_items():
+    """v29.7：AI 语义搜索工作项——SQL 关键词粗筛候选后，由 AI 判断语义相关性，返回匹配 id 与理由"""
+    data = request.get_json(silent=True) or {}
+    q = (data.get('q') or '').strip()
+    if not q:
+        return jsonify({'error': '请输入搜索内容'}), 400
+    db = get_db()
+    scope = data.get('scope') or ''
+    query = ('SELECT w.id, w.title, w.description, w.category, w.priority, w.status, u.display_name '
+             'FROM work_items w JOIN users u ON w.user_id = u.id WHERE 1=1')
+    params = []
+    if scope == 'personal' or not session.get('is_admin'):
+        # 个人工作台视角：可见范围与 /api/work-items?scope=personal 一致
+        query += " AND (w.user_id = ? OR (',' || w.collaborators || ',') LIKE ?)"
+        params.append(session['user_id'])
+        params.append(f'%,{session["user_id"]},%')
+        if session.get('is_admin'):
+            query += ' AND (w.transferred_to IS NULL OR w.transferred_to != ?)'
+            params.append(session['user_id'])
+    elif get_admin_scope():
+        # 子管理员：强制本团队
+        query += ' AND w.user_id IN (SELECT id FROM users WHERE team_id = ?)'
+        params.append(get_admin_scope())
+    # 关键词粗筛：任一子词命中标题/描述/分类即入候选，控制 AI 输入量
+    words = [w for w in re.split(r'[\s,，、;；]+', q) if w][:6]
+    if words:
+        conds = []
+        for w in words:
+            conds.append('(w.title LIKE ? OR w.description LIKE ? OR w.category LIKE ?)')
+            like = f'%{w}%'
+            params.extend([like, like, like])
+        query += ' AND (' + ' OR '.join(conds) + ')'
+    query += ' ORDER BY w.updated_at DESC LIMIT 120'
+    rows = db.execute(query, params).fetchall()
+    if not rows:
+        return jsonify({'ids': [], 'matches': [], 'total': 0, 'message': '未找到关键词相关的工作项，可换个说法试试。'})
+    status_map = {'pending': '待处理', 'in_progress': '进行中', 'completed': '已完成'}
+    lines = '\n'.join(
+        f"id={r['id']} | [{r['priority']}] {r['title']} | 分类:{r['category']} | 状态:{status_map.get(r['status'], r['status'])} | 负责人:{r['display_name']} | 描述:{(r['description'] or '')[:80]}"
+        for r in rows
+    )
+    system = (
+        '你是工作项语义搜索助手。根据用户的搜索意图，从候选工作项中挑出确实相关的事项。'
+        '需理解同义表述、近义概念与模糊描述（如“上周那个服务器的事”）。'
+        '只输出 JSON：{"matches":[{"id":数字,"reason":"15字内理由"}]}，按相关度从高到低，最多 15 条，没有相关的输出空数组。'
+    )
+    try:
+        result = _ai_json(system, f"搜索意图：{q}\n\n候选工作项：\n{lines}", max_tokens=800, feature='search')
+    except Exception as e:
+        return jsonify({'error': f'AI 搜索失败: {e}'}), 502
+    valid_ids = {r['id'] for r in rows}
+    matches = []
+    for m in (result.get('matches') or []):
+        if isinstance(m, dict) and str(m.get('id') or '').isdigit() and int(m['id']) in valid_ids:
+            matches.append({'id': int(m['id']), 'reason': str(m.get('reason') or '')})
+    matches = matches[:15]
+    return jsonify({'ids': [m['id'] for m in matches], 'matches': matches, 'total': len(rows)})
 
 
 @app.route('/api/ai/chat', methods=['POST'])
@@ -1538,7 +1616,15 @@ def team_member_job_analysis(user_id):
         (user_id, week_ago)
     ).fetchall()
     chat_rows = _filter_chat_records(chat_rows, user_id, db)
-    chat_topics = list(dict.fromkeys([r['title'][:30] for r in chat_rows if r['title']]))[:8]
+    # v29.7：主题标注收发方向，让 AI 区分是员工本人的诉求还是接收到的消息
+    my_name = (user['display_name'] or '').strip()
+    chat_topics = []
+    for r in chat_rows:
+        if not r['title']:
+            continue
+        tag = '我发出' if _is_my_message(r.get('content') or '', my_name) else '收到'
+        chat_topics.append(f"{r['title'][:30]}（{tag}）")
+    chat_topics = list(dict.fromkeys(chat_topics))[:8]
     # v25.7-fix：待办过滤已完成的；日程携带日期时间
     todo_rows = db.execute(
         "SELECT title, content FROM user_knowledge WHERE user_id=? AND source='dingtalk_todo' AND occur_date>=? ORDER BY event_time DESC LIMIT 10",
@@ -1592,7 +1678,7 @@ def team_member_job_analysis(user_id):
         f"1小时内完成{fast_count}条，超8小时{slow_count}条。\n"
     )
     if chat_topics:
-        prompt += f"近期高频对话主题（近7天）：{'；'.join(chat_topics)}\n"
+        prompt += f"近期高频对话主题（近7天，方向：我发出=本人发送/收到=接收）：{'；'.join(chat_topics)}\n"
     if todo_titles:
         prompt += f"近期待办：{'；'.join(todo_titles)}\n"
     if cal_titles:
@@ -1848,6 +1934,16 @@ def list_work_items():
     if status_filter and status_filter != 'all':
         query += ' AND w.status = ?'
         params.append(status_filter)
+
+    # v29.7：分类/优先级筛选（工作台与工作内容管理共用）
+    category_filter = request.args.get('category')
+    priority_filter = request.args.get('priority')
+    if category_filter:
+        query += ' AND w.category = ?'
+        params.append(category_filter)
+    if priority_filter:
+        query += ' AND w.priority = ?'
+        params.append(priority_filter)
 
     query += ' ORDER BY CASE w.priority WHEN "P0" THEN 0 WHEN "P1" THEN 1 WHEN "P2" THEN 2 ELSE 3 END, w.sort_order, w.created_at DESC'
     items = db.execute(query, params).fetchall()
@@ -5881,6 +5977,13 @@ def _chat_sender(content):
     """从 content 中提取发送人"""
     m = re.search(r'发送人：([^\n]+)', content or '')
     return m.group(1).strip() if m else ''
+
+
+def _is_my_message(content, my_name):
+    """v29.7：判断一条聊天记录是否当前用户本人发出（供 AI 分析区分收发方向）"""
+    if not my_name:
+        return False
+    return _chat_sender(content or '') == my_name
 
 
 def _filter_chat_records(chat_rows, user_id, db=None):
