@@ -6792,18 +6792,25 @@ def _itop_options():
             return _itop_opts_cache['data']
     client = _get_itop_client()
     out = {}
-    for k, (oql, limit) in {
-        'teams': ("SELECT Team", 300),
-        'persons': ("SELECT Person WHERE status = 'active'", 1500),
-        'service_families': ("SELECT ServiceFamily", 200),
-        'services': ("SELECT Service", 800),
-        'subcategories': ("SELECT ServiceSubcategory", 1200),
+    # itop-mcp run_oql 单页上限 200 条，人员/子类别超千条需分页拉全
+    for k, oql in {
+        'teams': "SELECT Team",
+        'persons': "SELECT Person WHERE status = 'active'",
+        'service_families': "SELECT ServiceFamily",
+        'services': "SELECT Service",
+        'subcategories': "SELECT ServiceSubcategory",
     }.items():
         try:
-            rows = client.call_json('run_oql', {'oql': oql, 'output_fields': 'id,friendlyname',
-                                                'limit': limit, 'page': 1})
-            if not isinstance(rows, list):
-                rows = []
+            rows, page = [], 1
+            while page <= 10:
+                res = client.call_json('run_oql', {
+                    'oql': oql, 'output_fields': 'id,friendlyname',
+                    'limit': 200, 'page': page})
+                batch = res if isinstance(res, list) else []
+                rows.extend(batch)
+                if len(batch) < 200:
+                    break
+                page += 1
             items, seen = [], set()
             for r in rows:
                 if not isinstance(r, dict):
