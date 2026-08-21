@@ -6802,11 +6802,14 @@ def _itop_options():
         'services': "SELECT Service",
         'subcategories': "SELECT ServiceSubcategory",
     }.items():
+        # 服务/子类别带上父级外键，供默认补全时选配套值（族→服务→子类别）
+        outf = 'id,friendlyname,servicefamily_id' if k == 'services' \
+            else ('id,friendlyname,service_id' if k == 'subcategories' else 'id,friendlyname')
         try:
             rows, page = [], 1
             while page <= 20:
                 res = client.call_json('run_oql', {
-                    'oql': oql, 'output_fields': 'id,friendlyname',
+                    'oql': oql, 'output_fields': outf,
                     'limit': 200, 'page': page})
                 batch = res if isinstance(res, list) else []
                 rows.extend(batch)
@@ -6820,7 +6823,12 @@ def _itop_options():
                 rid, name = str(r.get('id') or ''), str(r.get('friendlyname') or '').strip()
                 if rid and rid not in seen:
                     seen.add(rid)
-                    items.append({'id': rid, 'name': name})
+                    it = {'id': rid, 'name': name}
+                    if k == 'services':
+                        it['servicefamily_id'] = str(r.get('servicefamily_id') or '')
+                    elif k == 'subcategories':
+                        it['service_id'] = str(r.get('service_id') or '')
+                    items.append(it)
             items.sort(key=lambda x: x['name'])
             out[k] = items
         except Exception:
@@ -6829,6 +6837,79 @@ def _itop_options():
         _itop_opts_cache['ts'] = now
         _itop_opts_cache['data'] = out
     return out
+
+
+def _itop_default_service_triple():
+    """v29.8 同日补丁：服务族/服务/子类别默认值（配套选取）。
+    env ITOP_DEFAULT_SERVICEFAMILY_ID/ITOP_DEFAULT_SERVICE_ID 优先；
+    否则选「事件处理/日常运维」族（取第一个含下属服务的族），服务取该族首条，子类别取该服务首条。"""
+    fam = os.environ.get('ITOP_DEFAULT_SERVICEFAMILY_ID', '').strip()
+    svc = os.environ.get('ITOP_DEFAULT_SERVICE_ID', '').strip()
+    sub = os.environ.get('ITOP_DEFAULT_SERVICESUBCATEGORY_ID', '').strip()
+    try:
+        opts = _itop_options()
+    except Exception:
+        return fam or None, svc or None, sub or None
+    fams, svcs, subs = opts.get('service_families') or [], opts.get('services') or [], opts.get('subcategories') or []
+    if not fam:
+        picked_f = None
+        for want in ('事件处理', '日常运维'):
+            picked_f = next((f for f in fams if want in f['name']), None)
+            if picked_f:
+                break
+        if not picked_f:
+            picked_f = next((f for f in fams
+                             if any(s.get('servicefamily_id') == f['id'] for s in svcs)), None) or (fams[0] if fams else None)
+        fam = picked_f['id'] if picked_f else ''
+    if fam and not svc:
+        cand = [s for s in svcs if s.get('servicefamily_id') == fam] or svcs
+        svc = cand[0]['id'] if cand else ''
+    if svc and not sub:
+        cand = [s for s in subs if s.get('service_id') == svc] or subs
+        sub = cand[0]['id'] if cand else ''
+    return fam or None, svc or None, sub or None
+
+
+def _itop_autofill_fields(need, fields, row):
+    """v29.8 同日补丁：iTop 必填字段默认值自动补全，补全后直接重试不再拦截。
+    服务族/服务/子类别：用户已选 > 工单原值（raw_data）> 默认配套值；
+    枚举类给安全默认（解决方式=日常运维/协助、挂起原因=其他）。
+    返回 (autofill_dict, unfilled_list)。"""
+    raw = {}
+    try:
+        raw = json.loads((row or {}).get('raw_data') or '{}')
+        if not isinstance(raw, dict):
+            raw = {}
+    except Exception:
+        raw = {}
+    triple = None
+    autofill, unfilled = {}, []
+    svc_keys = ('servicefamily_id', 'service_id', 'servicesubcategory_id')
+    for f in need:
+        if fields.get(f) not in (None, '', 0):
+            continue
+        if f in svc_keys:
+            if triple is None:
+                triple = _itop_default_service_triple()
+            v = str(raw.get(f) or '').strip()
+            if not v:
+                v = {'servicefamily_id': triple[0], 'service_id': triple[1],
+                     'servicesubcategory_id': triple[2]}[f] or ''
+            if v:
+                autofill[f] = v
+            else:
+                unfilled.append(f)
+        elif f == 'resolution_code':
+            autofill[f] = 'assistance'
+        elif f == 'pending_reason':
+            autofill[f] = 'other'
+        else:
+            v = raw.get(f)
+            if v not in (None, '', 0):
+                autofill[f] = v
+            else:
+                unfilled.append(f)
+    return autofill, unfilled
 
 
 _ITOP_MARK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
@@ -7454,10 +7535,18 @@ def itop_ticket_apply_stimulus(cls, ref):
                 m2 = re.search(r"Missing mandatory attribute\(s\)[^:]*:\s*(.+?)\.?\s*$", msg)
                 if m2:
                     need = [x.strip() for x in m2.group(1).split(',') if x.strip()]
-                    return jsonify({'ok': False, 'need_fields': need,
-                                    'error': 'iTop 要求补充以下必填字段后才能执行该流转：%s' % '、'.join(need)}), 400
-                # 专用工具失败（参数不符/旧版 MCP 无此工具）→ 降级通用 apply_stimulus
+                    # v29.8 同日补丁：默认值自动补全后降级通用 apply_stimulus 重试（专用工具参数面窄，
+                    # 服务族/服务类字段直接走 fields 提交更稳）；补不齐才让前端动态补填
+                    autofill, unfilled = _itop_autofill_fields(need, fields, row)
+                    if not unfilled:
+                        fields = dict(fields, **autofill)
+                        comment = comment + '（必填字段由工作台默认值自动补全：%s）' % '、'.join(sorted(autofill))
+                    else:
+                        return jsonify({'ok': False, 'need_fields': need,
+                                        'error': 'iTop 要求补充以下必填字段后才能执行该流转：%s' % '、'.join(need)}), 400
+                # 专用工具失败（参数不符/旧版 MCP 无此工具/已补默认字段）→ 降级通用 apply_stimulus
         res, last_err = None, None
+        _autofilled_once = set()  # 已自动补全过的缺失字段组合，再报同样缺失则不再重试
         for _attempt in range(3):
             args = {'iop_class': cls, 'key': key, 'stimulus': stimulus,
                     'comment': comment}
@@ -7476,10 +7565,18 @@ def itop_ticket_apply_stimulus(cls, ref):
                     fields.pop(m.group(1))
                     last_err = msg
                     continue
-                # v29.0 必填字段动态感知：返回缺失字段清单，前端弹窗动态渲染补填
+                # v29.0 必填字段动态感知；v29.8 同日补丁：先用默认值自动补全重试，补不齐才返回前端补填
                 m2 = re.search(r"Missing mandatory attribute\(s\)[^:]*:\s*(.+?)\.?\s*$", msg)
                 if m2:
                     need = [x.strip() for x in m2.group(1).split(',') if x.strip()]
+                    nkey = frozenset(need)
+                    autofill, unfilled = _itop_autofill_fields(need, fields, row)
+                    if not unfilled and autofill and nkey not in _autofilled_once:
+                        _autofilled_once.add(nkey)
+                        fields = dict(fields, **autofill)
+                        comment = comment + '（必填字段由工作台默认值自动补全：%s）' % '、'.join(sorted(autofill))
+                        last_err = msg
+                        continue
                     return jsonify({'ok': False, 'need_fields': need,
                                     'error': 'iTop 要求补充以下必填字段后才能执行该流转：%s' % '、'.join(need)}), 400
                 # v29.0 状态不匹配转友好提示
