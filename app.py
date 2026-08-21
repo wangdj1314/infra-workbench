@@ -6763,6 +6763,65 @@ ITOP_STIMULUS_FIELD_WHITELIST = frozenset({
     'withdraw_reason', 'notes', 'comment', 'handling_method', 'is_repair',
     'symptom', 'repair_notes', 'resolution_date', 'close_date',
 })
+# v29.8：itop-mcp 专用流转工具映射（内置字段校验，推荐优先于通用 apply_stimulus）；
+# None = 定制动作无专用工具，走通用 apply_stimulus + 字段自适应重试
+ITOP_STIMULUS_TOOL = {
+    'ev_assign': 'assign_ticket', 'ev_reassign': 'reassign_ticket',
+    'ev_process': 'process_ticket', 'ev_resolve': 'resolve_ticket',
+    'ev_pending': 'pending_ticket', 'ev_close': 'close_ticket',
+}
+# v29.8：枚举选项（itop-mcp 内置校验定义；解决方式 Incident 用枚举串、UserRequest 兼容 assistance）
+ITOP_RESOLUTION_CODES = [
+    ('assistance', '日常运维/协助'), ('fix_applied', '已修复'), ('workaround', '临时方案'),
+    ('known_error', '已知错误'), ('other', '其他'),
+]
+ITOP_PENDING_REASONS = [
+    ('awaiting_caller', '等待用户反馈'), ('awaiting_change', '等待变更'),
+    ('awaiting_supplier', '等待供应商'), ('other', '其他'),
+]
+# v29.8：下拉选项缓存（团队/人员/服务目录，避免每次开弹窗都查 iTop）
+_itop_opts_cache = {'ts': 0, 'data': None}
+_itop_opts_lock = threading.Lock()
+
+
+def _itop_options():
+    """团队/处理工程师/服务族/服务/服务子类别下拉数据（10 分钟缓存）"""
+    now = time.time()
+    with _itop_opts_lock:
+        if _itop_opts_cache['data'] and now - _itop_opts_cache['ts'] < 600:
+            return _itop_opts_cache['data']
+    client = _get_itop_client()
+    out = {}
+    for k, (oql, limit) in {
+        'teams': ("SELECT Team", 300),
+        'persons': ("SELECT Person WHERE status = 'active'", 1500),
+        'service_families': ("SELECT ServiceFamily", 200),
+        'services': ("SELECT Service", 800),
+        'subcategories': ("SELECT ServiceSubcategory", 1200),
+    }.items():
+        try:
+            rows = client.call_json('run_oql', {'oql': oql, 'output_fields': 'id,friendlyname',
+                                                'limit': limit, 'page': 1})
+            if not isinstance(rows, list):
+                rows = []
+            items, seen = [], set()
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                rid, name = str(r.get('id') or ''), str(r.get('friendlyname') or '').strip()
+                if rid and rid not in seen:
+                    seen.add(rid)
+                    items.append({'id': rid, 'name': name})
+            items.sort(key=lambda x: x['name'])
+            out[k] = items
+        except Exception:
+            out[k] = []
+    with _itop_opts_lock:
+        _itop_opts_cache['ts'] = now
+        _itop_opts_cache['data'] = out
+    return out
+
+
 _ITOP_MARK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 
 _itop_mcp = None
@@ -7267,6 +7326,16 @@ def itop_ticket_add_log(cls, ref):
         return jsonify({'error': 'iTop 写回失败：%s' % e}), 502
 
 
+@app.route('/api/itop/options')
+@login_required
+def itop_options():
+    # v29.8：流转弹窗下拉数据（团队/处理工程师/服务族/服务/子类别，10 分钟缓存）
+    try:
+        return jsonify(_itop_options())
+    except Exception as e:
+        return jsonify({'error': '获取 iTop 选项失败：%s' % e}), 502
+
+
 @app.route('/api/itop/tickets/<cls>/<ref>/transitions')
 @login_required
 def itop_ticket_transitions(cls, ref):
@@ -7293,7 +7362,9 @@ def itop_ticket_transitions(cls, ref):
         trans = [{'code': c, 'label': ITOP_STIMULUS_LABEL.get(c, c)} for c in (codes or [])]
         if codes is None and cls not in ITOP_STATE_STIMULI:
             source = 'none'  # 未映射类：不限制，交 iTop 校验
-    return jsonify({'status': status, 'source': source, 'transitions': trans})
+    return jsonify({'status': status, 'source': source, 'transitions': trans,
+                    'resolution_codes': ITOP_RESOLUTION_CODES,
+                    'pending_reasons': ITOP_PENDING_REASONS})
 
 
 @app.route('/api/itop/tickets/<cls>/<ref>/stimulus', methods=['POST'])
@@ -7344,10 +7415,43 @@ def itop_ticket_apply_stimulus(cls, ref):
         else:
             fields = {}
         client = _get_itop_client()
+        comment = (data.get('comment') or 'infra-workbench v29')
+        # v29.8：已知动作优先走 itop-mcp 专用工具（内置字段校验，报错更准）
+        tool = ITOP_STIMULUS_TOOL.get(stimulus)
+        if tool:
+            targs = {'ticket_class': cls, 'key': key, 'comment': comment}
+            if tool in ('assign_ticket', 'reassign_ticket'):
+                for fk in ('team_id', 'agent_id'):
+                    if not fields.get(fk):
+                        return jsonify({'error': '该动作需要选择处理团队和处理工程师'}), 400
+                    targs[fk] = int(fields[fk])
+            elif tool == 'resolve_ticket':
+                if not fields.get('solution'):
+                    return jsonify({'error': '请填写解决方案'}), 400
+                targs['solution'] = fields['solution']
+                for fk in ('resolution_code', 'servicesubcategory_id', 'difficulty_level'):
+                    if fields.get(fk) not in (None, '', 0):
+                        targs[fk] = fields[fk]
+            elif tool == 'pending_ticket':
+                if not fields.get('pending_reason'):
+                    return jsonify({'error': '请选择挂起原因'}), 400
+                targs['pending_reason'] = fields['pending_reason']
+            try:
+                res = client.call_json(tool, targs)
+                _refresh_itop_ticket(cls, ref)
+                return jsonify({'ok': True, 'result': res})
+            except Exception as e:
+                msg = str(e)
+                m2 = re.search(r"Missing mandatory attribute\(s\)[^:]*:\s*(.+?)\.?\s*$", msg)
+                if m2:
+                    need = [x.strip() for x in m2.group(1).split(',') if x.strip()]
+                    return jsonify({'ok': False, 'need_fields': need,
+                                    'error': 'iTop 要求补充以下必填字段后才能执行该流转：%s' % '、'.join(need)}), 400
+                # 专用工具失败（参数不符/旧版 MCP 无此工具）→ 降级通用 apply_stimulus
         res, last_err = None, None
         for _attempt in range(3):
             args = {'iop_class': cls, 'key': key, 'stimulus': stimulus,
-                    'comment': (data.get('comment') or 'infra-workbench v29')}
+                    'comment': comment}
             if fields:
                 args['fields'] = fields
             try:

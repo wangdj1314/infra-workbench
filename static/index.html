@@ -620,7 +620,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="login-card">
     <div class="login-logo">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <h1>基础架构工作台 <span class="version-badge">v29.7.2</span></h1>
+      <h1>基础架构工作台 <span class="version-badge">v29.8</span></h1>
       <p>Infrastructure Team Workbench</p>
     </div>
     <div id="loginError" class="login-error hidden"></div>
@@ -645,7 +645,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="topbar">
     <div class="topbar-left">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" style="width:22px;height:22px"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v29.7.2">v29.7.2</span>
+      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v29.8">v29.8</span>
     </div>
     <div class="topbar-right">
       <div class="ai-token-badge" onclick="switchTab('apikey')" title="AI Token 消耗">
@@ -1380,6 +1380,13 @@ const ITOP_STIMULUS_OPTS = [
   ['ev_manual_resolve','手动关闭'], ['ev_repair','委外维修'], ['ev_reassign','重新分配'],
   ['ev_close','关闭'], ['ev_reopen','重新打开'], ['ev_return','退回'],
   ['ev_withdraw','撤回'], ['ev_submit_approval','提交审批'], ['ev_reject','拒绝']];
+// v29.8：流转字段枚举（与 itop-mcp 内置校验定义一致）
+const ITOP_RESOLUTION_CODES = [
+  ['fix_applied','已修复'], ['workaround','临时方案'], ['known_error','已知错误'],
+  ['assistance','日常运维/协助'], ['other','其他']];
+const ITOP_PENDING_REASONS = [
+  ['awaiting_caller','等待用户反馈'], ['awaiting_change','等待变更'],
+  ['awaiting_supplier','等待供应商'], ['other','其他']];
 // v29.7.2：静态映射仅作后端实时抓取失败的兜底（Incident 为定制版状态机实测结果：
 // assigned 只能 ev_process 接单，无 ev_startworking）；权威来源是 /transitions 接口
 const ITOP_STATE_STIMULI = {
@@ -1580,9 +1587,11 @@ function itopApplyStimulusGo() {
       <div id="resolveFields" style="display:none">
         <div class="form-row"><label>解决方式 *</label>
           <select id="resolutionCode">
-            ${isUr ? '<option value="assistance">日常运维</option>'
-                   : '<option value="1">远程解决</option><option value="2">现场解决</option>'}
+            ${isUr ? '<option value="assistance">日常运维/协助</option>'
+                   : '<option value="">请选择</option>' + ITOP_RESOLUTION_CODES.map(o => `<option value="${o[0]}">${o[1]}（${o[0]}）</option>`).join('')}
           </select></div>
+        <div class="form-row" id="svcSubcategoryRow" style="display:${isUr ? 'none' : ''}"><label>服务子类别 *</label>
+          <select id="svcSubcategory" data-cur="${escapeHtml(raw.servicesubcategory_id || '')}"><option value="">加载中…</option></select></div>
         <div class="form-row"><label>解决方案 *</label><textarea id="solution" style="min-height:60px"></textarea></div>
         ${isUr ? '' : `<div class="form-row"><label>难度等级 *</label>
           <select id="difficultyLevel">
@@ -1592,14 +1601,21 @@ function itopApplyStimulusGo() {
           </select></div>`}
       </div>
       <div id="pendingFields" style="display:none">
-        <div class="form-row"><label>挂起原因 *</label><textarea id="pendingReason" style="min-height:60px" placeholder="如：等待用户反馈 / 等待供应商 / 等待变更窗口..."></textarea></div>
+        <div class="form-row"><label>挂起原因 *</label>
+          <select id="pendingReason">
+            ${ITOP_PENDING_REASONS.map(o => `<option value="${o[0]}">${o[1]}（${o[0]}）</option>`).join('')}
+          </select></div>
       </div>
       <div id="assignFields" style="display:none">
-        <p class="ai-hint">指派需填写以下字段（已预填工单当前值，可修改）：</p>
-        <div class="form-row"><label>处理团队ID *</label><input type="number" id="f_team_id" value="${escapeHtml(raw.team_id || '')}"></div>
-        <div class="form-row"><label>处理工程师ID *</label><input type="number" id="f_agent_id" value="${escapeHtml(raw.agent_id || '')}" placeholder="iTop Person ID"></div>
-        <div class="form-row"><label>服务族ID *</label><input type="number" id="f_servicefamily_id" value="${escapeHtml(raw.servicefamily_id || '')}"></div>
-        <div class="form-row"><label>服务ID *</label><input type="number" id="f_service_id" value="${escapeHtml(raw.service_id || '')}"></div>
+        <p class="ai-hint">派单/转派需选择处理团队和处理工程师（已预填工单当前值，可修改）：</p>
+        <div class="form-row"><label>处理团队 *</label>
+          <select id="f_team_id" data-cur="${escapeHtml(raw.team_id || '')}"><option value="">加载中…</option></select></div>
+        <div class="form-row"><label>处理工程师 *</label>
+          <select id="f_agent_id" data-cur="${escapeHtml(raw.agent_id || '')}"><option value="">加载中…</option></select></div>
+        <div class="form-row"><label>服务族（可选）</label>
+          <select id="f_servicefamily_id" data-cur="${escapeHtml(raw.servicefamily_id || '')}"><option value="">加载中…</option></select></div>
+        <div class="form-row"><label>服务（可选）</label>
+          <select id="f_service_id" data-cur="${escapeHtml(raw.service_id || '')}"><option value="">加载中…</option></select></div>
       </div>
       <div id="itopExtraFields" style="display:none">
         <p class="ai-hint" id="itopExtraHint"></p>
@@ -1648,6 +1664,35 @@ async function loadItopTransitions(cur, fbOpts) {
     hint.textContent = `⚠ 未能实时连接 iTop，上方为本地兜底动作清单（可能与实际不符，提交时以 iTop 校验为准）。当前状态：${itopStatusText(cur.status)}。`;
   }
   onStimulusChange();
+  loadItopSelectOptions();
+}
+
+// v29.8：加载团队/工程师/服务目录下拉选项并填充弹窗 select（失败降级为手输 ID）
+async function loadItopSelectOptions() {
+  const map = {f_team_id:'teams', f_agent_id:'persons', f_servicefamily_id:'service_families',
+               f_service_id:'services', svcSubcategory:'subcategories'};
+  let data = window._itopOptsCache;
+  if (!data) {
+    try {
+      const res = await fetch('/api/itop/options', {credentials: 'same-origin'});
+      if (res.ok) data = window._itopOptsCache = await res.json();
+    } catch (e) { /* 降级 */ }
+  }
+  Object.keys(map).forEach(id => {
+    const sel = document.getElementById(id);
+    if (!sel) return;
+    const items = (data && data[map[id]]) || [];
+    if (!items.length) {
+      // 降级：恢复为手输 ID 输入框
+      const cur = sel.dataset.cur || '';
+      sel.outerHTML = `<input type="number" id="${id}" value="${escapeHtml(cur)}" placeholder="iTop ID">`;
+      return;
+    }
+    sel.innerHTML = '<option value="">请选择</option>' +
+      items.map(o => `<option value="${o.id}">${escapeHtml(o.name)}（${o.id}）</option>`).join('');
+    const cur = sel.dataset.cur || '';
+    if (cur) sel.value = cur;
+  });
 }
 
 function onStimulusChange() {
@@ -1685,15 +1730,24 @@ async function itopSubmitStimulus() {
   if (stim === 'ev_resolve') {
     const sol = val('solution');
     if (!sol) { alert('请填写解决方案'); return; }
-    fields.resolution_code = val('resolutionCode');
+    const rc = val('resolutionCode');
+    if (!rc) { alert('请选择解决方式'); return; }
+    fields.resolution_code = rc;
     fields.solution = sol;
+    // v29.8：Incident 解决必填服务子类别（itop-mcp resolve_ticket 校验）
+    if (cur.cls !== 'UserRequest') {
+      const sc = val('svcSubcategory');
+      if (!sc) { alert('请选择服务子类别'); return; }
+      fields.servicesubcategory_id = parseInt(sc);
+    }
     const dlEl = document.getElementById('difficultyLevel');
     if (dlEl) fields.difficulty_level = parseInt(dlEl.value);
   } else if (stim === 'ev_pending') {
     const pr = val('pendingReason');
-    if (!pr) { alert('请填写挂起原因'); return; }
+    if (!pr) { alert('请选择挂起原因'); return; }
     fields.pending_reason = pr;
   } else if (stim === 'ev_assign' || stim === 'ev_reassign') {
+    if (!val('f_team_id') || !val('f_agent_id')) { alert('请选择处理团队和处理工程师'); return; }
     ['team_id', 'agent_id', 'servicefamily_id', 'service_id'].forEach(fid => {
       const v = val('f_' + fid);
       if (v) fields[fid] = parseInt(v);
