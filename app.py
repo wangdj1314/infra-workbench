@@ -6792,10 +6792,12 @@ def _itop_options():
             return _itop_opts_cache['data']
     client = _get_itop_client()
     out = {}
-    # itop-mcp run_oql 单页上限 200 条，人员/子类别超千条需分页拉全
+    # itop-mcp run_oql 单页上限 200 条，子类别超千条需分页拉全；
+    # persons 限定团队成员（全量 active 超 8000 含会议室等噪声，团队在编仅数百）
     for k, oql in {
         'teams': "SELECT Team",
-        'persons': "SELECT Person WHERE status = 'active'",
+        'persons': ("SELECT Person AS p JOIN lnkPersonToTeam AS l ON l.person_id=p.id "
+                    "WHERE p.status = 'active'"),
         'service_families': "SELECT ServiceFamily",
         'services': "SELECT Service",
         'subcategories': "SELECT ServiceSubcategory",
