@@ -679,6 +679,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
         <div class="sb-section-title">AI 工作建议</div>
         <div class="sb-suggestion" id="sbSuggestion">点击下方按钮生成 AI 工作建议</div>
         <button class="sb-suggestion-btn" id="sbSuggestBtn" onclick="loadAISuggestion()">✨ 生成工作建议</button>
+        <button class="sb-suggestion-btn" id="sbCommBtn" onclick="loadAICommSuggestion()">💬 沟通建议</button>
       </div>
     </div>
 
@@ -1169,6 +1170,20 @@ async function loadAISuggestion() {
     document.getElementById('sbSuggestion').textContent = '生成失败: ' + err.message;
   } finally {
     btn.disabled = false; btn.textContent = '✨ 生成工作建议';
+  }
+}
+
+// v29.6：沟通建议——分析近期钉钉聊天内容，给出会话话术建议
+async function loadAICommSuggestion() {
+  const btn = document.getElementById('sbCommBtn');
+  btn.disabled = true; btn.textContent = 'AI 分析聊天中...';
+  try {
+    const data = await api('/api/ai/comm-suggest', {method:'POST'});
+    document.getElementById('sbSuggestion').textContent = data.suggestion;
+  } catch(err) {
+    document.getElementById('sbSuggestion').textContent = '生成失败: ' + err.message;
+  } finally {
+    btn.disabled = false; btn.textContent = '💬 沟通建议';
   }
 }
 
@@ -4499,7 +4514,7 @@ async function loadAiUsage() {
       data.by_feature.forEach(f => {
         const labels = {describe:'生成描述', decompose:'任务分解', suggest:'工作建议', analysis:'工作分析',
       report_daily:'日报', report_weekly:'周报', report_monthly:'月报', report:'报告',
-      mcp_doc:'MCP部署文档', job_analysis:'岗位分析', report_edit:'报告润色', complete_polish:'完成说明润色', edit_polish:'编辑润色',
+      mcp_doc:'MCP部署文档', job_analysis:'岗位分析', report_edit:'报告润色', complete_polish:'完成说明润色', edit_polish:'编辑润色', comm_suggest:'沟通建议',
       chat:'AI对话', unknown:'其他'};
         html += `<div class="sb-stat-row"><span>${labels[f.feature]||f.feature} (${f.calls}次)</span><span style="font-size:13px">${f.tokens} tokens</span></div>`;
       });

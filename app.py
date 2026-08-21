@@ -884,6 +884,47 @@ def ai_daily_suggest():
         return jsonify({'error': f'AI 生成建议失败: {e}'}), 502
 
 
+@app.route('/api/ai/comm-suggest', methods=['POST'])
+@login_required
+def ai_comm_suggest():
+    """v29.6：沟通建议——分析用户近期钉钉聊天内容，给出会话话术建议"""
+    db = get_db()
+    uid = session['user_id']
+    week_ago = (date.today() - timedelta(days=7)).isoformat()
+    chat_rows = db.execute(
+        "SELECT title, content, event_time FROM user_knowledge WHERE user_id=? AND source='dingtalk_chat' AND occur_date>=? ORDER BY event_time DESC LIMIT 20",
+        (uid, week_ago)
+    ).fetchall()
+    if not chat_rows:
+        return jsonify({'suggestion': '暂无近期聊天记录，请先在「知识库」绑定钉钉并同步后再试。'})
+    # 组装会话素材：会话名 + 时间 + 内容（单条截断、总量控制，防止超 token）
+    parts = []
+    total = 0
+    for r in chat_rows:
+        content = (r['content'] or '').strip()
+        if not content:
+            continue
+        if len(content) > 500:
+            content = content[:500] + '…（已截断）'
+        block = f"【{r['title'] or '未知会话'}】{r['event_time'] or ''}\n{content}"
+        if total + len(block) > 6000:
+            break
+        parts.append(block)
+        total += len(block)
+    if not parts:
+        return jsonify({'suggestion': '聊天记录内容为空，无法分析。'})
+    system = (
+        '你是企业内部沟通教练。下面是用户近期从钉钉同步的聊天记录（含发送人与消息内容，部分可能被截断）。请分析沟通现状：'
+        '1) 识别待回复/待确认/有潜在风险的事项；2) 针对每个事项给出可直接使用的话术建议（如何开场、要点表达、收尾诉求），语气专业简洁；'
+        '3) 如发现可改进的沟通习惯（表达方式、回复时机等）附一条简短建议。直接按序号输出，不要客套话。'
+    )
+    try:
+        suggestion = ai_chat(system, '\n\n'.join(parts), max_tokens=800, feature='comm_suggest')
+        return jsonify({'suggestion': suggestion})
+    except Exception as e:
+        return jsonify({'error': f'AI 生成沟通建议失败: {e}'}), 502
+
+
 @app.route('/api/ai/chat', methods=['POST'])
 @login_required
 def ai_chat_route():
