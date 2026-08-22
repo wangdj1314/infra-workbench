@@ -620,7 +620,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="login-card">
     <div class="login-logo">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <h1>基础架构工作台 <span class="version-badge">v29.8</span></h1>
+      <h1>基础架构工作台 <span class="version-badge">v29.9</span></h1>
       <p>Infrastructure Team Workbench</p>
     </div>
     <div id="loginError" class="login-error hidden"></div>
@@ -645,7 +645,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
   <div class="topbar">
     <div class="topbar-left">
       <svg viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" style="width:22px;height:22px"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v29.8">v29.8</span>
+      <span>基础架构工作台</span><span class="version-badge" title="当前部署版本 v29.9">v29.9</span>
     </div>
     <div class="topbar-right">
       <div class="ai-token-badge" onclick="switchTab('apikey')" title="AI Token 消耗">
@@ -1380,13 +1380,13 @@ const ITOP_STIMULUS_OPTS = [
   ['ev_manual_resolve','手动关闭'], ['ev_repair','委外维修'], ['ev_reassign','重新分配'],
   ['ev_close','关闭'], ['ev_reopen','重新打开'], ['ev_return','退回'],
   ['ev_withdraw','撤回'], ['ev_submit_approval','提交审批'], ['ev_reject','拒绝']];
-// v29.8：流转字段枚举（与 itop-mcp 内置校验定义一致）
-const ITOP_RESOLUTION_CODES = [
-  ['fix_applied','已修复'], ['workaround','临时方案'], ['known_error','已知错误'],
-  ['assistance','日常运维/协助'], ['other','其他']];
+// v29.9：流转字段枚举（按工单类取 iTop 生产实测值；itop-mcp 内置校验定义与真实数据模型不符弃用）
+const ITOP_RESOLUTION_CODES = {
+  Incident: [['1','远程解决'], ['2','现场解决']],
+  UserRequest: [['assistance','日常运维/协助'], ['other','其他'], ['bug fixed','缺陷修复'], ['hardware repair','硬件维修']]};
+// 挂起原因为自由文本字段（iTop 不做枚举校验），仅给常用建议语
 const ITOP_PENDING_REASONS = [
-  ['awaiting_caller','等待用户反馈'], ['awaiting_change','等待变更'],
-  ['awaiting_supplier','等待供应商'], ['other','其他']];
+  ['等待用户反馈','等待用户反馈'], ['等待供应商处理','等待供应商处理'], ['排查中','排查中'], ['其他','其他']];
 // v29.7.2：静态映射仅作后端实时抓取失败的兜底（Incident 为定制版状态机实测结果：
 // assigned 只能 ev_process 接单，无 ev_startworking）；权威来源是 /transitions 接口
 const ITOP_STATE_STIMULI = {
@@ -1587,8 +1587,8 @@ function itopApplyStimulusGo() {
       <div id="resolveFields" style="display:none">
         <div class="form-row"><label>解决方式 *</label>
           <select id="resolutionCode">
-            ${isUr ? '<option value="assistance">日常运维/协助</option>'
-                   : '<option value="">请选择</option>' + ITOP_RESOLUTION_CODES.map(o => `<option value="${o[0]}">${o[1]}（${o[0]}）</option>`).join('')}
+            ${isUr ? ITOP_RESOLUTION_CODES.UserRequest.map((o, i) => `<option value="${o[0]}"${i === 0 ? ' selected' : ''}>${o[1]}</option>`).join('')
+                   : '<option value="">请选择</option>' + ITOP_RESOLUTION_CODES.Incident.map(o => `<option value="${o[0]}">${o[1]}（${o[0]}）</option>`).join('')}
           </select></div>
         <div class="form-row" id="svcSubcategoryRow" style="display:${isUr ? 'none' : ''}"><label>服务子类别 *</label>
           <select id="svcSubcategory" data-cur="${escapeHtml(raw.servicesubcategory_id || '')}"><option value="">加载中…</option></select></div>
@@ -1603,7 +1603,7 @@ function itopApplyStimulusGo() {
       <div id="pendingFields" style="display:none">
         <div class="form-row"><label>挂起原因 *</label>
           <select id="pendingReason">
-            ${ITOP_PENDING_REASONS.map(o => `<option value="${o[0]}">${o[1]}（${o[0]}）</option>`).join('')}
+            ${ITOP_PENDING_REASONS.map(o => `<option value="${o[0]}">${o[1]}</option>`).join('')}
           </select></div>
       </div>
       <div id="assignFields" style="display:none">

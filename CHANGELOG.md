@@ -2,6 +2,14 @@
 
 版本规则：主版本号跟随年份迭代（v25.x → v26.0），功能变更在本文件登记。
 
+## v29.9（2026-08-22）
+
+### 修复：流转弹窗再报错「Unexpected value for attribute '解决方式'」（枚举取值与定制版 iTop 不符）
+- **根因**：v29.8 把「解决方式/挂起原因」选项误按 itop-mcp 内置校验定义（fix_applied/assistance…）下发，而生产 iTop 数据模型实测：Incident 的 resolution_code 是定制数字枚举（1=远程解决/2=现场解决，已解决工单 1291/189 条），UserRequest 才是英文枚举（assistance/other/bug fixed/hardware repair）；pending_reason 两类均为自由文本（Text），iTop 不做枚举校验；difficulty_level/handling_method 也是数字取值（1~3 / 1~2）
+- **后端**：`ITOP_RESOLUTION_CODES` 改为按工单类区分的实测枚举（`/transitions` 接口同步按类下发）；自动补全默认解决方式按类取值（Incident=1、UserRequest=assistance）、挂起原因默认「其他」自由文本；新增非法枚举取值自适应——iTop 报 `Unexpected value for attribute` 时自动改用该工单类实测默认值重试一次（备注追加审计字样），不再 502 弹窗
+- **前端**：流转弹窗「解决方式」按工单类渲染正确枚举（Incident：远程解决/现场解决；UserRequest：日常运维/协助等）；「挂起原因」改为自由文本常用建议语（等待用户反馈/等待供应商处理/排查中/其他）
+- 版本徽标 → v29.9
+
 ## v29.8（2026-08-21）
 
 ### 新增：流转走 itop-mcp 专用工具 + ID 选择全部选项框化（配合 itop-mcp 流转逻辑修正）

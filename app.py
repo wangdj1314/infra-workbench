@@ -6770,14 +6770,17 @@ ITOP_STIMULUS_TOOL = {
     'ev_process': 'process_ticket', 'ev_resolve': 'resolve_ticket',
     'ev_pending': 'pending_ticket', 'ev_close': 'close_ticket',
 }
-# v29.8：枚举选项（itop-mcp 内置校验定义；解决方式 Incident 用枚举串、UserRequest 兼容 assistance）
-ITOP_RESOLUTION_CODES = [
-    ('assistance', '日常运维/协助'), ('fix_applied', '已修复'), ('workaround', '临时方案'),
-    ('known_error', '已知错误'), ('other', '其他'),
-]
+# v29.9：枚举按工单类生产实测值（itop-mcp 内置校验定义与真实 iTop 数据模型不符，弃用）：
+# Incident resolution_code 为定制数字枚举 1=远程解决/2=现场解决，UserRequest 为标准英文枚举；
+# pending_reason 两类均为自由文本（Text），iTop 不做枚举校验，仅给常用建议语。
+ITOP_RESOLUTION_CODES = {
+    'Incident': [('1', '远程解决'), ('2', '现场解决')],
+    'UserRequest': [('assistance', '日常运维/协助'), ('other', '其他'),
+                    ('bug fixed', '缺陷修复'), ('hardware repair', '硬件维修')],
+}
 ITOP_PENDING_REASONS = [
-    ('awaiting_caller', '等待用户反馈'), ('awaiting_change', '等待变更'),
-    ('awaiting_supplier', '等待供应商'), ('other', '其他'),
+    ('等待用户反馈', '等待用户反馈'), ('等待供应商处理', '等待供应商处理'),
+    ('排查中', '排查中'), ('其他', '其他'),
 ]
 # v29.8：下拉选项缓存（团队/人员/服务目录，避免每次开弹窗都查 iTop）
 _itop_opts_cache = {'ts': 0, 'data': None}
@@ -6873,7 +6876,7 @@ def _itop_default_service_triple():
 def _itop_autofill_fields(need, fields, row):
     """v29.8 同日补丁：iTop 必填字段默认值自动补全，补全后直接重试不再拦截。
     服务族/服务/子类别：用户已选 > 工单原值（raw_data）> 默认配套值；
-    枚举类给安全默认（解决方式=日常运维/协助、挂起原因=其他）。
+    枚举类给安全默认（解决方式按工单类实测值、挂起原因自由文本）。
     返回 (autofill_dict, unfilled_list)。"""
     raw = {}
     try:
@@ -6900,9 +6903,10 @@ def _itop_autofill_fields(need, fields, row):
             else:
                 unfilled.append(f)
         elif f == 'resolution_code':
-            autofill[f] = 'assistance'
+            # Incident 定制数字枚举（1=远程解决）、UserRequest 为 assistance（生产实测值）
+            autofill[f] = '1' if (row or {}).get('ticket_class') == 'Incident' else 'assistance'
         elif f == 'pending_reason':
-            autofill[f] = 'other'
+            autofill[f] = '其他'  # 自由文本字段，iTop 不做枚举校验
         else:
             v = raw.get(f)
             if v not in (None, '', 0):
@@ -7453,7 +7457,7 @@ def itop_ticket_transitions(cls, ref):
         if codes is None and cls not in ITOP_STATE_STIMULI:
             source = 'none'  # 未映射类：不限制，交 iTop 校验
     return jsonify({'status': status, 'source': source, 'transitions': trans,
-                    'resolution_codes': ITOP_RESOLUTION_CODES,
+                    'resolution_codes': ITOP_RESOLUTION_CODES.get(cls, []),
                     'pending_reasons': ITOP_PENDING_REASONS})
 
 
@@ -7547,6 +7551,7 @@ def itop_ticket_apply_stimulus(cls, ref):
                 # 专用工具失败（参数不符/旧版 MCP 无此工具/已补默认字段）→ 降级通用 apply_stimulus
         res, last_err = None, None
         _autofilled_once = set()  # 已自动补全过的缺失字段组合，再报同样缺失则不再重试
+        _enum_fixed = set()  # 已做过取值降级的枚举字段，防同值反复被拒
         for _attempt in range(3):
             args = {'iop_class': cls, 'key': key, 'stimulus': stimulus,
                     'comment': comment}
@@ -7579,6 +7584,23 @@ def itop_ticket_apply_stimulus(cls, ref):
                         continue
                     return jsonify({'ok': False, 'need_fields': need,
                                     'error': 'iTop 要求补充以下必填字段后才能执行该流转：%s' % '、'.join(need)}), 400
+                # v29.9 非法枚举取值自适应：改用该工单类实测默认值重试一次（仅一次，防反复被拒）
+                # iTop 报错格式 "Unexpected value for attribute '解决方式' (resolution_code): Value not allowed [xxx]"
+                m4 = re.search(r"Unexpected value for attribute [^(]*\((\w+)\)", msg)
+                if m4 and m4.group(1) in fields and m4.group(1) not in _enum_fixed:
+                    fn = m4.group(1)
+                    if fn == 'resolution_code':
+                        fields[fn] = '1' if cls == 'Incident' else 'assistance'
+                    elif fn == 'difficulty_level':
+                        fields[fn] = '1'
+                    elif fn == 'handling_method':
+                        fields[fn] = '2'
+                    else:
+                        return jsonify({'error': 'iTop 流转失败：%s' % msg}), 502
+                    _enum_fixed.add(fn)
+                    comment = comment + '（字段 %s 取值不被 iTop 接受，已改用默认值 %s）' % (fn, fields[fn])
+                    last_err = msg
+                    continue
                 # v29.0 状态不匹配转友好提示
                 m3 = re.search(r"Invalid stimulus: '(\w+)' on the object (\S+) in state '(\w+)'", msg)
                 if m3:
